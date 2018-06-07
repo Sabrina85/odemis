@@ -44,7 +44,7 @@ directory.
 Graphical user interface
 ------------------------
 The Graphical User Interface (GUI) allows the user to manipulate the microscope
-and displays the acquired data. This usual user interface for the target user.
+and displays the acquired data. This usually is the user interface for the target user.
 The code can be found in the ``src/odemis/gui/`` directory.
 
 File import/export
