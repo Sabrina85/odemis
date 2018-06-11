@@ -700,7 +700,7 @@ class TestHDF5IO(unittest.TestCase):
                      model.MD_BPP: 12,
                      model.MD_PIXEL_SIZE: (1e-6, 1e-6),  # m/px
                      model.MD_POS: (1e-3, -30e-3),  # m
-                     model.MD_EXP_TIME: 1.2,  # s
+                     model.MD_DWELL_TIME: 1e-6,  # s
                      model.MD_LENS_MAG: 1200,  # ratio
                      model.MD_EBEAM_VOLTAGE: 10000,  # V
                      model.MD_EBEAM_CURRENT: 2.6,  # A
