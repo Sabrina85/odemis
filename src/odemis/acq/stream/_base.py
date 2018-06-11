@@ -173,7 +173,7 @@ class Stream(object):
         # indicating if stream has already been prepared
         self._prepared = False
         # TODO: should_update is a GUI stuff => move away from stream
-        # should_update has no effect direct effect, it's just a flag to
+        # should_update has no direct effect, it's just a flag to
         # indicate the user would like to have the stream updated (live)
         self.should_update = model.BooleanVA(False)
         # is_active set to True will keep the acquisition going on
