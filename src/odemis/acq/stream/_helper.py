@@ -584,32 +584,28 @@ class TemporalSpectrumSettingsStream(CCDSettingsStream):
 
         super(TemporalSpectrumSettingsStream, self).__init__(name, detector, dataflow, emitter, **kwargs)  # init of CCDSettingsStream
 
-        # Fuzzing doesn't make much sense as it would mostly blur the image
-        # del self.fuzzing  # TODO why in spectrum then?
-
         self.active = False  # variable keep track if stream is active/inactive
 
         # For SPARC: typical user wants density much lower than SEM
-        self.pixelSize.value *= 30  # TODO still true for streak  What does that mean?
+        self.pixelSize.value *= 30  # TODO still true for streak  What does that mean?.....please comment
         self.streak_unit = streak_unit
         self.streak_delay = streak_delay
 
         # the VAs are used in SEMCCDMDStream (_sync.py)
-        self._streak_unit_vas = self._duplicateVAs(streak_unit, "dev", streak_unit_vas or set())
-        # TODO we most likely need the delay
-        # self._streak_delay_vas = self._duplicateVAs(streak_delay, "dev", streak_delay_vas or set())
-        # TODO check if we change the timeRange VA in the GUI and a stream is active
-        # also change the triggerDelay via the LUT MD_TIME_RANGE_TO_DELAY
-        # if value not in MD it will use the default value in yaml
-        # maybe report that the delay for that timeRange was not calibrated!
-        # TODO should we have a readonly delay VA in acq tab? might be useful
-        # self.triggerDelay = model.FloatContinuous(triggerDelay, range_trigDelay)
+        self._streak_unit_vas = self._duplicateVAs(streak_unit, "det", streak_unit_vas)
 
-        # whenever .timeRange and/or .streakMode changes
+        # whenever .streakMode changes
         # -> set .MCPgain = 0 and update .MCPgain.range
-        self._streak_unit_vas["timeRange"].subscribe(self._OnMCPGain)
-        self._streak_unit_vas["streakMode"].subscribe(self._OnMCPGain)
-        self._streak_unit_vas["MCPgain"].subscribe(self._OnMCPGainRange)
+        # This is important for HW safety reasons to not destroy the streak unit,
+        # when changing on of the VA while using a high MCPgain.
+        # While the stream is not active: range of possible values for MCPgain
+        # is limited to values <= current value to also prevent HW damage
+        # when starting to play the stream again.
+        try:
+            self.detStreakMode.subscribe(self._OnStreakSettings)
+            self.detMCPgain.subscribe(self._OnMCPGain)
+        except ValueError:
+            raise ValueError("Necessary HW VAs for streak camera war not provided!")
 
     # Override Stream._is_active_setter() in _base.py
     def _is_active_setter(self, active):
@@ -618,22 +614,22 @@ class TemporalSpectrumSettingsStream(CCDSettingsStream):
             # make the full MCPgain range available when stream is active
             self._streak_unit_vas["MCPgain"].range = self.streak_unit.MCPgain.range
         else:
-            self._setMCPGainHWVA()
+            self._resetMCPGainHW()
             # only allow values <= current MCPgain value for HW safety reasons when stream inactive
             self._streak_unit_vas["MCPgain"].range = (0, self._streak_unit_vas["MCPgain"].value)
         return self.active
 
-    def _setMCPGainHWVA(self):
+    def _resetMCPGainHW(self):
         """"Set HW MCPgain VA = 0, but keep GUI VA = previous value, when stream = inactive."""
         self.streak_unit.MCPgain.value = 0
 
-    def _OnMCPGain(self, value):
+    def _OnStreakSettings(self, value):
         """Callback, which sets MCPgain GUI VA = 0,
         if .timeRange and/or .streakMode GUI VAs have changed."""
         self._streak_unit_vas["MCPgain"].value = 0  # set GUI VA 0
-        self._OnMCPGainRange(value)  # update the .MCPgain VA
+        self._OnMCPGain(value)  # update the .MCPgain VA
 
-    def _OnMCPGainRange(self, _=None):
+    def _OnMCPGain(self, _=None):
         """Callback, which updates the range of possible values for MCPgain GUI VA if stream is inactive:
         only values <= current value are allowed.
         If stream is active the full range is available."""
