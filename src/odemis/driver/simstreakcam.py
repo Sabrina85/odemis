@@ -136,7 +136,6 @@ class ReadoutCamera(model.DigitalCamera):
         prev_binning, self._binning = self._binning, value
 
         # adapt resolution
-        # TODO check if really necessary  - can be removed??
         change = (prev_binning[0] / self._binning[0],
                   prev_binning[1] / self._binning[1])
         old_resolution = self.resolution.value
@@ -447,11 +446,11 @@ class DelayGenerator(model.HwComponent):
     def updateMetadata(self, md):
 
         if model.MD_TIME_RANGE_TO_DELAY in md:
-            for timeRange, delay in md[model.MD_TIME_RANGE_TO_DELAY].iteritems():
+            for timeRange, delay in md[model.MD_TIME_RANGE_TO_DELAY].items():
                 if not isinstance(delay, numbers.Real):
                     raise ValueError("Trigger delay %s corresponding to time range %s is not of type float."
                                      "Please check calibration file for trigger delay." % (delay, timeRange))
-                if not 0. <= delay <= 1.:
+                if not 0 <= delay <= 1:
                     raise ValueError("Trigger delay %s corresponding to time range %s is not in range (0, 1)."
                                      "Please check the calibration file for the trigger delay." % (delay, timeRange))
 
