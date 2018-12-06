@@ -121,15 +121,13 @@ class ReadoutCamera(model.DigitalCamera):
         self.parent._getReadoutCamInfo = True
         cam_info = parent.CamParamGet("Setup", "CameraInfo")
         try:
-            # needs to be a string for tiff export!
-            self._hwVersion = cam_info[0][0] + ", " + cam_info[0][1] + ", " + cam_info[0][2]
+            self._hwVersion = cam_info[0][0] + ", " + cam_info[0][1] + ", " + cam_info[0][2]   # needs to be a string
         except:
             self._hwVersion = "dummy"
             logging.debug("Could not get hardware information for streak readout camera.")
         self._metadata[model.MD_HW_VERSION] = self._hwVersion
         try:
-            # needs to be a string for tiff export!
-            self._swVersion = cam_info[0][3] + ", " + cam_info[0][4]
+            self._swVersion = cam_info[0][3] + ", " + cam_info[0][4]   # needs to be a string
         except:
             self._swVersion = "dummy"
             logging.debug("Could not get software information for streak readout camera.")
@@ -253,6 +251,7 @@ class ReadoutCamera(model.DigitalCamera):
         # ResolutionVA need tuple instead of list of format [2 x 2]
         binning = "%s x %s" % (value[0], value[1])
 
+        # TODO use update_settings()
         # If camera is acquiring, it is essential to stop cam first and then change binning.
         # Currently, this only affects the Alignment tab, where camera is continuously acquiring.
         self.parent.AcqStop()  # TODO check with HW!
@@ -262,7 +261,6 @@ class ReadoutCamera(model.DigitalCamera):
         prev_binning, self._binning = self._binning, value
 
         # adapt resolution
-        # TODO check if really necessary - can be removed??
         change = (prev_binning[0] / self._binning[0],
                   prev_binning[1] / self._binning[1])
         old_resolution = self.resolution.value
@@ -487,18 +485,16 @@ class ReadoutCamera(model.DigitalCamera):
                     logging.debug("Acquisiton was stopped so flush previous images.")
                     continue
 
-                self._metadata[model.MD_ACQ_DATE] = time.time()
-                # TODO more fancy maybe? metadata[model.MD_ACQ_DATE] = time.time() - (exposure_time + readout_time)
-                # TODO remove this TODO leave as it is???
+                self._metadata[model.MD_ACQ_DATE] = time.time() - \
+                                                    (self.exposureTime.value + self._metadata[model.MD_READOUT_TIME])
 
                 # get the image from the buffer
                 img_num = rargs[1]
                 img_info = self.parent.ImgRingBufferGet("Data", img_num)
 
-                # can be NoneType if img_num to high!!
-                # TODO looks like img_info can be empty/None type object -> need a check here?
-                # TODO can it be empty? Should there not first the Live acq start, and then getImage as we have the
-                # TODO lock for sending commands  - not sure we can remove that comment...
+                if not img_info:  # TODO check if this ever happens in log and if not remove!
+                    logging.warning("Image info received from buffer is empty!")
+                    continue
 
                 img_size = int(img_info[0]) * int(img_info[1]) * 2  # num of bytes we need to receive #TODO why 2?
                 img_num_actual = img_info[4]
@@ -565,7 +561,7 @@ class ReadoutCamera(model.DigitalCamera):
             self.t_image.join(5)
         try:
             self._stop()  # stop any acquisition
-        except Exception:  # TODO which exception????????
+        except Exception:
             pass
 
 
@@ -580,8 +576,7 @@ class StreakUnit(model.HwComponent):
         self.parent = parent
         self.location = "Streakcamera"  # don't change, internally needed by HPDTA/RemoteEx
 
-        # needs to be a string for tiff export!
-        self._hwVersion = parent.DevParamGet(self.location, "DeviceName")[0]
+        self._hwVersion = parent.DevParamGet(self.location, "DeviceName")[0]   # needs to be a string
         self._metadata[model.MD_HW_VERSION] = self._hwVersion
 
         # Set parameters streak unit
@@ -683,9 +678,9 @@ class StreakUnit(model.HwComponent):
     def _getStreakUnitMCPGainRange(self):
         """
         Get range for streak unit MCP gain.
-        First 5 values see CamParamInfoEx.
         :return: (tuple of int) range for MCP gain values
         """
+        # First 5 values see CamParamInfoEx.
         MCPgainRange_raw = self.parent.DevParamInfoEx(self.location, "MCP Gain")[5:]
         MCPgainRange = (int(MCPgainRange_raw[0]),
                         int(MCPgainRange_raw[1]))
@@ -798,8 +793,7 @@ class DelayGenerator(model.HwComponent):
         self.parent = parent
         self.location = "Delaybox"  # don't change, internally needed by HPDTA/RemoteEx
 
-        # needs to be a string for tiff export!
-        self._hwVersion = parent.DevParamGet(self.location, "DeviceName")[0]
+        self._hwVersion = parent.DevParamGet(self.location, "DeviceName")[0]   # needs to be a string
         self._metadata[model.MD_HW_VERSION] = self._hwVersion
 
         # Set parameters delay generator
@@ -825,11 +819,11 @@ class DelayGenerator(model.HwComponent):
     def updateMetadata(self, md):
 
         if model.MD_TIME_RANGE_TO_DELAY in md:
-            for timeRange, delay in md[model.MD_TIME_RANGE_TO_DELAY].iteritems():
+            for timeRange, delay in md[model.MD_TIME_RANGE_TO_DELAY].items():
                 if not isinstance(delay, numbers.Real):
                     raise ValueError("Trigger delay %s corresponding to time range %s is not of type float."
                                      "Please check calibration file for trigger delay." % (delay, timeRange))
-                if not 0. <= delay <= 1.:
+                if not 0 <= delay <= 1:
                     raise ValueError("Trigger delay %s corresponding to time range %s is not in range (0, 1)."
                                      "Please check the calibration file for the trigger delay." % (delay, timeRange))
 
@@ -1135,38 +1129,22 @@ class StreakCamera(model.HwComponent):
                         continue  # return to try-statement and start receiving again
 
                     if self._getReadoutCamInfo:
-                        # TODO leave as it is? and remove commented code?
-                        # command parent.CamParamGet("Setup", "CameraInfo") behaves differently then all other commands
-                        # nasty trick to work around for this command
-                        # This command is nasty as it first receives the error_code and then additional information
-                        # TODO are there more cases like that??
-
-                        # info_size = 2 * 1000  # TODO how many bytes??
-                        # additional_info = []
-                        # time.sleep(1)
-                        # self.timeout_commandport = 10
-                        # self._commandport.settimeout(5.0)
-
-                        # TODO would like to use that, but socket.timeout not handled correctly
-                        # while len(additional_info) < info_size:
-                        #     try:
-                        #         additional_info.append(self._commandport.recv(4096))  # receive more data
-                        #     except socket.timeout:
-                        #         break
-
+                        # command parent.CamParamGet("Setup", "CameraInfo") behaves differently then all other commands.
+                        # Use nasty trick to work around for this command.
+                        # This command first receives the error_code and then additional information.
                         additional_info = ""
                         timeout = 1
                         start = time.time()
                         while time.time() < start + timeout:
                             try:
-                                # continue listening as there is additional info in coming
+                                # continue listening as there is additional info coming in
                                 additional_info += self._commandport.recv(4096)   # receive more data
                             except Exception:
                                 break
                         try:
                             additional_info = additional_info.split("\r")[:-1]
-                            for i, item in enumerate(additional_info):
-                                rargs.append(item.replace("\n", ""))
+                            for item in additional_info:
+                                rargs.append(item.replace("\n", ""))  # TODO check if multiple \n in string, else replace with .strip()
                             msg_splitted[2] = rargs
                         except Exception:
                             logging.error("Could not retrieve readout camera information.")
@@ -1343,8 +1321,7 @@ class StreakCamera(model.HwComponent):
                     ShowDelay2Control: Shows or hides the Delay2 status/control dialog
                     ShowSpectrControl: Shows or hides the Spectrograph status/control dialog
         :parameter value: (str) PARAM_TYPE_BOOL."""
-        if not isinstance(value, str):
-            value = str(value)
+        value = str(value)
         self.sendCommand("GenParamSet", parameter, value)
 
     def GenParamInfo(self, parameter):
