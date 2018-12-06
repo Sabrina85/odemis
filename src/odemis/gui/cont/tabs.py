@@ -31,10 +31,13 @@ import gc
 import logging
 import math
 import numpy
+import csv
+import numbers
 from odemis import dataio, model
 from odemis.acq import calibration, leech
 from odemis.acq.align import AutoFocus, AutoFocusSpectrometer
-from odemis.acq.stream import OpticalStream, SpectrumStream, CLStream, EMStream, \
+from odemis.acq.stream import OpticalStream, SpectrumStream, TemporalSpectrumStream, \
+    CLStream, EMStream, \
     ARStream, CLSettingsStream, ARSettingsStream, MonochromatorSettingsStream, \
     RGBCameraStream, BrightfieldStream, RGBStream, RGBUpdatableStream, \
     ScannedTCSettingsStream
@@ -53,10 +56,10 @@ from odemis.gui.cont.streams import StreamController
 from odemis.gui.model import TOOL_ZOOM, TOOL_ROI, TOOL_ROA, TOOL_RO_ANCHOR, \
     TOOL_POINT, TOOL_LINE, TOOL_SPOT, TOOL_ACT_ZOOM_FIT, TOOL_AUTO_FOCUS, \
     TOOL_NONE, TOOL_DICHO
-from odemis.gui.util import call_in_wx_main
+from odemis.gui.util import call_in_wx_main, get_picture_folder
 from odemis.gui.util.widgets import ProgressiveFutureConnector, AxisConnector, \
     ScannerFoVAdapter
-from odemis.util import units, spot, limit_invocation
+from odemis.util import units, spot, limit_invocation, almost_equal, find_closest
 from odemis.util.dataio import data_to_static_streams, open_acquisition
 import os.path
 import pkg_resources
@@ -71,9 +74,11 @@ import odemis.acq.stream as acqstream
 import odemis.gui.cont.acquisition as acqcont
 import odemis.gui.cont.export as exportcont
 import odemis.gui.cont.streams as streamcont
+import odemis.gui.comp.settings as settingscomp
 import odemis.gui.cont.views as viewcont
 import odemis.gui.model as guimod
 import odemis.gui.util as guiutil
+import odemis.gui.conf.util as guiconfutil
 import odemis.gui.util.align as align
 from odemis.acq.stream._projection import SinglePointSpectrumProjection, LineSpectrumProjection, \
     TemporalSpectrumProjection, RGBSpatialSpectrumProjection, SinglePointChronoProjection
@@ -912,11 +917,33 @@ class SparcAcquisitionTab(Tab):
              {"name": "Spectrum",
               "stream_classes": SpectrumStream,
               }),
-            (viewports[3],
-             {"name": "Monochromator",
-              "stream_classes": MonochromatorSettingsStream,
-              }),
         ])
+
+        # depending on HW choose which viewport should be connected to a stream
+        # TODO: for now only time correlator HW or streak cam HW handled
+        if main_data.streak_cam:
+            vpv[viewports[3]] = {
+                "name": "Temporal Spectrum",
+                "stream_classes": TemporalSpectrumStream,
+            }
+
+        else:
+            vpv[viewports[4]] = {
+                "name": "Monochromator",
+                "stream_classes": MonochromatorSettingsStream,
+            }
+
+        # show either one or the other depending on HW
+        # TODO it seems to have no impact ... GUI responds always the same...for streakcam HW and for Monochromator
+        # viewports[3].Show(main_data.streak_cam is not None)
+        # viewports[4].Show(main_data.time_correlator is not None)  # panel.vp_flim_chronograph.Show()
+        # if main_data.streak_cam:
+        #     panel.vp_sparc_ts.Show()
+        # if main_data.time_correlator:
+        #     panel.vp_flim_chronograph.Show()
+
+        # TODO what if none of both? double one of the other viewports? Can we go with 3?
+
         # Add connection to SEM hFoV if possible
         if main_data.ebeamControlsMag:
             vpv[viewports[0]]["fov_hw"] = main_data.ebeam
@@ -940,8 +967,13 @@ class SparcAcquisitionTab(Tab):
                 (panel.vp_sparc_bl, panel.lbl_sparc_view_bl)),
             (
                 panel.btn_sparc_view_br,
-                (panel.vp_sparc_br, panel.lbl_sparc_view_br)),
+                (panel.vp_sparc_br, panel.lbl_sparc_view_br)),  # default is now monochromator
         ])
+
+        # hack to overwrite the view buttons
+        if main_data.streak_cam:
+            # Note: for now either streak camera HW or monochromator HW possible
+            buttons[panel.btn_sparc_view_br] = (panel.vp_sparc_ts, panel.lbl_sparc_view_br)
 
         self._view_selector = viewcont.ViewButtonController(tab_data, panel, buttons, viewports)
 
@@ -2921,7 +2953,7 @@ class SparcAlignTab(Tab):
 
 class Sparc2AlignTab(Tab):
     """
-    Tab for the mirror/fiber alignment on the SPARCv2. Note that the basic idea
+    Tab for the mirror/fiber/lens/streak-camera alignment on the SPARCv2. Note that the basic idea
     is similar to the SPARC(v1), but the actual procedure is entirely different.
     """
 
@@ -2939,10 +2971,70 @@ class Sparc2AlignTab(Tab):
             else:
                 self._moveLensToActive()
 
-        # Documentation text on the right panel for mirror alignment
-        doc_path = pkg_resources.resource_filename("odemis.gui", "doc/sparc2_header.html")
+        # Documentation text on the right panel for alignment
+        self.doc_path = pkg_resources.resource_filename("odemis.gui", "doc/sparc2_header.html")
         panel.html_moi_doc.SetBorders(0)
-        panel.html_moi_doc.LoadPage(doc_path)
+        panel.html_moi_doc.LoadPage(self.doc_path)
+
+        if main_data.streak_cam:
+            self.streak_ccd = main_data.streak_ccd
+            self.streak_delay = main_data.streak_delay
+            self.streak_unit = main_data.streak_unit
+            self.streak_lens = main_data.streak_lens
+
+            # TODO move this code?
+            self.panel_streak = settingscomp.SettingsPanel(panel.pnl_streak)
+            self.panel_streak.SetBackgroundColour("#444444")
+            self.panel.pnl_streak.GetSizer().Add(self.panel_streak, 1, border=5,
+                              flag=wx.BOTTOM | wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+
+            entry_timeRange = guiconfutil.create_setting_entry(self.panel_streak, "Time range",
+                                                     main_data.streak_unit.timeRange,
+                                                     main_data.streak_unit,
+                                                     conf={"control_type": odemis.gui.CONTROL_COMBO,
+                                                           "label": "Time range",
+                                                           "tooltip": "Time needed by the streak unit for one sweep "
+                                                                      "from top to bottom of the readout camera chip."}
+                                                     )
+            entry_timeRange.value_ctrl.SetBackgroundColour("#444444")
+            self.ctrl_timeRange = entry_timeRange.value_ctrl
+
+            entry_triggerDelay = guiconfutil.create_setting_entry(self.panel_streak, "Trigger delay",
+                                                      main_data.streak_delay.triggerDelay,
+                                                      main_data.streak_delay,
+                                                      conf={"control_type": odemis.gui.CONTROL_FLT,
+                                                            "label": "Trigger delay",
+                                                            "tooltip": "Change the trigger delay value to "
+                                                                       "center the image."},
+                                                      change_callback=self._onUpdateTriggerDelayMD)
+
+            entry_triggerDelay.value_ctrl.SetBackgroundColour("#444444")
+            self.ctrl_triggerDelay = entry_triggerDelay.value_ctrl
+
+            entry_magnification = guiconfutil.create_setting_entry(self.panel_streak, "Magnification",
+                                                      main_data.streak_lens.magnification,
+                                                      main_data.streak_lens,
+                                                      conf={"control_type": odemis.gui.CONTROL_COMBO,
+                                                            "label": "Magnification",
+                                                            "tooltip": "Change the magnification of the input"
+                                                                       "optics for the streak camera system. \n"
+                                                                       "Values < 1: De-magnifying \n"
+                                                                       "Values > 1: Magnifying"})
+
+            entry_magnification.value_ctrl.SetBackgroundColour("#444444")
+            self.combo_magnification = entry_magnification.value_ctrl
+
+            # remove border
+            self.panel_streak.GetSizer().GetItem(0).SetBorder(0)
+            self.panel_streak.Layout()
+
+            # !!Note: In order to make sure the default value shown in the GUI corresponds
+            # to the correct trigger delay from the MD, we call the setter of the .timeRange VA,
+            # which sets the correct value for the .triggerDelay VA from MD-lookup
+            # Cannot be done in the driver, as MD from yaml is updated after initalization of HW!!
+            self.streak_unit.timeRange.value = self.streak_unit.timeRange.value
+
+            # TODO when are the panel_streak.Children connected with actual VAs?
 
         # Create stream & view
         self._stream_controller = streamcont.StreamBarController(
@@ -2978,6 +3070,12 @@ class Sparc2AlignTab(Tab):
                     "stream_classes": acqstream.CameraCountStream,
                 }
             ),
+            (self.panel.vp_align_streak,
+             {
+                 "name": "Trigger delay calibration",
+                 "stream_classes": acqstream.StreakCamStream,
+             }
+             ),
         ))
 
         self.view_controller = viewcont.ViewPortController(tab_data, panel, vpv)
@@ -3088,8 +3186,6 @@ class Sparc2AlignTab(Tab):
             self.panel.btn_autofocus.Bind(wx.EVT_BUTTON, self._onClickFocus)
             tab_data.autofocus_active.subscribe(self._onAutofocus)
 
-            doc_cnt = pkg_resources.resource_string("odemis.gui", "doc/sparc2_autofocus.html")
-            panel.html_moi_doc.AppendToPage(doc_cnt)
         else:
             self.panel.pnl_focus.Show(False)
 
@@ -3138,8 +3234,6 @@ class Sparc2AlignTab(Tab):
             # To activate the SEM spot when the CCD plays
             mois.should_update.subscribe(self._on_ccd_stream_play)
 
-            doc_cnt = pkg_resources.resource_string("odemis.gui", "doc/sparc2_mirror.html")
-            panel.html_moi_doc.AppendToPage(doc_cnt)
         elif main_data.sp_ccd:
             # Hack: if there is no CCD, let's display at least the sp-ccd.
             # It might or not be useful. At least we can show the temperature.
@@ -3169,13 +3263,49 @@ class Sparc2AlignTab(Tab):
         else:
             self.panel.btn_bkg_acquire.Show(False)
 
+        if main_data.streak_cam:
+
+            vas_streak_unit = get_local_vas(main_data.streak_unit, main_data.hw_settings_config)
+
+            tempSpecStream = acqstream.StreakCamStream(
+                                "Calibration trigger delay for streak camera",
+                                main_data.streak_ccd,
+                                main_data.streak_ccd.data,
+                                main_data.streak_unit,
+                                main_data.streak_delay,
+                                emitter=None,
+                                detvas=get_local_vas(main_data.streak_ccd, main_data.hw_settings_config),
+                                forcemd={model.MD_POS: (0, 0),  # Just in case the stage is there
+                                         model.MD_ROTATION: 0},  # Force the CCD as-is
+                                streak_unit_vas=vas_streak_unit,
+                                )
+
+            # Make sure the binning is not crazy (especially can happen if CCD is shared for spectrometry)
+            self._setFullFoV(tempSpecStream, (2, 2))
+            self._tempSpec_stream = tempSpecStream
+
+            streak = self._stream_controller.addStream(tempSpecStream,
+                             add_to_view=self.panel.vp_align_streak.view)
+            streak.stream_panel.flatten()  # No need for the stream name
+
+            # add spectrograph VA "grating"
+            self.spectrograph = main_data.spectrograph
+            streak.add_axis_entry("grating", self.spectrograph,
+                                  conf={"control_type": odemis.gui.CONTROL_COMBO,
+                                        "label": "Grating",
+                                        "tooltip": "Change/mirror the grating of the spectrograph."}
+                                  )
+
+            # To activate the SEM spot when the camera plays
+            # (ebeam centered in image)
+            tempSpecStream.should_update.subscribe(self._on_ccd_stream_play)
+
         if "lens-align" not in tab_data.align_mode.choices:
             self.panel.pnl_lens_mover.Show(False)
             # In such case, there is no focus affecting the ccd, so the
             # pnl_focus will also be hidden later on, by the ccd_focuser code
         else:
-            doc_cnt = pkg_resources.resource_string("odemis.gui", "doc/sparc2_lens.html")
-            panel.html_moi_doc.AppendToPage(doc_cnt)
+            self.panel.btn_manualfocus.Bind(wx.EVT_BUTTON, self._onManualfocus)
 
         if "center-align" in tab_data.align_mode.choices:
             # The center align view share the same CCD stream (and settings)
@@ -3199,6 +3329,15 @@ class Sparc2AlignTab(Tab):
             # CPU load, without reason. Ideally, the view controller/canvas
             # should be clever enough to detect this and not actually cause a
             # redraw.
+
+        # steak camera
+        if "streak-align" not in tab_data.align_mode.choices:
+            self.panel.pnl_streak.Show(False)
+        else:
+            self.panel.btn_manualfocus.Show(True)  # TODO only for streak cam now
+            # Bind event
+            self.panel.btn_open_streak_calib_file.Bind(wx.EVT_BUTTON, self._onOpenCalibFile)
+            self.panel.btn_save_streak_calib_file.Bind(wx.EVT_BUTTON, self._onSaveCalibFile)
 
         # chronograph of spectrometer if "fiber-align" mode is present
         self._speccnt_stream = None
@@ -3245,21 +3384,24 @@ class Sparc2AlignTab(Tab):
         # * lens-align: first auto-focus spectrograph, then align lens1
         # * spot-mirror-align: same GUI as lens-align, but without auto-focus or lens => just
         # * mirror-align: move x, y of mirror with moment of inertia feedback
-        # * goal-align: find the center of the AR image using a "Goal" image
+        # * goal-align: find the center of the AR image using a "Goal" image  # TODO outdated?
         # * fiber-align: move x, y of the fibaligner with mean of spectrometer as feedback
+        # * streak-align: calibration of the trigger delays for temporal resolved acq
         self._alignbtn_to_mode = collections.OrderedDict((
             (panel.btn_align_lens, "lens-align"),
             (panel.btn_align_mirror, "mirror-align"),
             (panel.btn_align_centering, "center-align"),
             (panel.btn_align_fiber, "fiber-align"),
+            (panel.btn_align_streakcam, "streak-align"),
         ))
 
-        # The GUI mode to the optical path mode
+        # The GUI mode to the optical path mode (see path.py)
         self._mode_to_opm = {
             "mirror-align": "mirror-align",
             "lens-align": "mirror-align",  # if autofocus is needed: spec-focus (first)
             "center-align": "ar",
             "fiber-align": "fiber-align",
+            "streak-align": "streak-align",
         }
         # Note: ActuatorController hides the fiber alignment panel if not needed.
         for btn, mode in self._alignbtn_to_mode.items():
@@ -3296,6 +3438,22 @@ class Sparc2AlignTab(Tab):
         # Force MoI view fit to content when magnification is updated
         if not main_data.ebeamControlsMag:
             main_data.ebeam.magnification.subscribe(self._onSEMMag)
+
+    def _onUpdateTriggerDelayMD(self, value):
+        """
+        Overwrite the triggerDelay value in the MD after requested input via the GUI
+        """
+        cur_timeRange = self.streak_unit.timeRange.value
+        requested_triggerDelay = self.ctrl_triggerDelay.GetValue()
+        # get a copy of  MD
+        trigger2delay_MD = self.streak_delay.getMetadata()[model.MD_TIME_RANGE_TO_DELAY]
+        trigger2delay_MD[cur_timeRange] = requested_triggerDelay
+        self.streak_delay.updateMetadata({model.MD_TIME_RANGE_TO_DELAY: trigger2delay_MD})
+        # Note: updateMetadata should here never raise an exception as the UnitFloatCtrl already
+        # catches errors regarding type and out-of-range inputs
+        
+        # update txt displayed in GUI
+        self._onUpdateTriggerDelayGUI("Status", None)
 
     def _layoutModeButtons(self):
         """
@@ -3434,6 +3592,7 @@ class Sparc2AlignTab(Tab):
         # This is running in a separate thread (future). In most cases, no need to wait.
         op_mode = self._mode_to_opm[mode]
         f = main.opm.setPath(op_mode)
+        f.add_done_callback(self._on_align_mode_done)
 
         # Focused view must be updated before the stream to play is changed,
         # as the scheduler automatically adds the stream to the current view.
@@ -3444,8 +3603,15 @@ class Sparc2AlignTab(Tab):
             self.panel.pnl_mirror.Enable(True)  # also allow to move the mirror here
             self.panel.pnl_lens_mover.Enable(True)
             self.panel.pnl_focus.Enable(True)
+            self.panel.btn_autofocus.Enable(True)
+            self.panel.gauge_autofocus.Enable(True)
+
+            self.panel.slider_focus.Enable(False)  # disable manual focus
+            self.panel.btn_manualfocus.Enable(False)  # TODO used only for streak cam now, will be implemented soon
+
             self.panel.pnl_moi_settings.Show(False)
             self.panel.pnl_fibaligner.Enable(False)
+            self.panel.pnl_streak.Enable(False)
 
             # TODO: in this mode, if focus change, update the focus image once
             # (by going to spec-focus mode, turning the light, and acquiring an
@@ -3459,6 +3625,7 @@ class Sparc2AlignTab(Tab):
             self.panel.pnl_focus.Enable(False)
             self.panel.pnl_moi_settings.Show(True)
             self.panel.pnl_fibaligner.Enable(False)
+            self.panel.pnl_streak.Enable(False)
         elif mode == "center-align":
             self.tab_data_model.focussedView.value = self.panel.vp_align_center.view
             self._ccd_stream.should_update.value = True
@@ -3467,6 +3634,7 @@ class Sparc2AlignTab(Tab):
             self.panel.pnl_focus.Enable(False)
             self.panel.pnl_moi_settings.Show(False)
             self.panel.pnl_fibaligner.Enable(False)
+            self.panel.pnl_streak.Enable(False)
         elif mode == "fiber-align":
             self.tab_data_model.focussedView.value = self.panel.vp_align_fiber.view
             if self._speccnt_stream:
@@ -3481,13 +3649,60 @@ class Sparc2AlignTab(Tab):
             self.panel.btn_p_fibaligner_x.Enable(False)
             self.panel.btn_m_fibaligner_y.Enable(False)
             self.panel.btn_p_fibaligner_y.Enable(False)
+            self.panel.pnl_streak.Enable(False)
             # Note: it's OK to leave autofocus enabled, as it will wait by itself
             # for the fiber-aligner to be in place
             f.add_done_callback(self._on_fibalign_done)
+        elif mode == "streak-align":
+            self.tab_data_model.focussedView.value = self.panel.vp_align_streak.view
+            if self._tempSpec_stream:
+                self._tempSpec_stream.should_update.value = True
+            self.panel.pnl_mirror.Enable(False)
+            self.panel.pnl_lens_mover.Enable(False)
+            self.panel.pnl_focus.Enable(True)
+            self.panel.btn_manualfocus.Enable(True)
+            self.panel.btn_autofocus.Enable(False)
+            self.panel.gauge_autofocus.Enable(False)
+            self.panel.pnl_moi_settings.Show(False)
+            self.panel.pnl_fibaligner.Enable(False)
+            self.panel.pnl_streak.Enable(True)
         else:
             raise ValueError("Unknown alignment mode %s!" % mode)
+
+        # clear documentation panel when different mode is requested
+        # only display doc for current mode selected
+        self.panel.html_moi_doc.LoadPage(self.doc_path)
+        if mode == "lens-align":  # TODO
+            doc_cnt = pkg_resources.resource_string("odemis.gui", "doc/sparc2_autofocus.html")
+            self.panel.html_moi_doc.AppendToPage(doc_cnt)
+            doc_cnt = pkg_resources.resource_string("odemis.gui", "doc/sparc2_lens.html")
+            self.panel.html_moi_doc.AppendToPage(doc_cnt)
+        elif mode == "mirror-align":
+            doc_cnt = pkg_resources.resource_string("odemis.gui", "doc/sparc2_mirror.html")
+            self.panel.html_moi_doc.AppendToPage(doc_cnt)
+        elif mode == "center-align":  # TODO
+            doc_cnt = pkg_resources.resource_string("odemis.gui", "doc/sparc2_centering.html")
+            self.panel.html_moi_doc.AppendToPage(doc_cnt)
+        elif mode == "fiber-align":  # TODO
+            doc_cnt = pkg_resources.resource_string("odemis.gui", "doc/sparc2_fiber.html")
+            self.panel.html_moi_doc.AppendToPage(doc_cnt)
+        elif mode == "streak-align":
+            # add documentation for streak cam
+            doc_cnt = pkg_resources.resource_string("odemis.gui", "doc/sparc2_streakcam.html")
+            self.panel.html_moi_doc.AppendToPage(doc_cnt)
+        else:
+            logging.warning("Could not find alignment documentation for mode %s requested." % mode)
+
         # To adapt to the pnl_moi_settings showing on/off
         self.panel.html_moi_doc.Parent.Layout()
+
+    def _on_align_mode_done(self, f):
+        try:
+            f.result()
+        except:
+            logging.exception("Failed changing mode")
+        else:
+            logging.debug("Optical path updated")
 
     def _on_fibalign_done(self, f):
         """
@@ -3534,6 +3749,8 @@ class Sparc2AlignTab(Tab):
         ccdupdate = self._ccd_stream and self._ccd_stream.should_update.value
         spcupdate = self._speccnt_stream and self._speccnt_stream.should_update.value
         moiupdate = self._moi_stream and self._moi_stream.should_update.value
+        # streakccdupdate = self._tempSpec_stream and self._tempSpec_stream.should_update.value
+        # self._spot_stream.is_active.value = any((ccdupdate, spcupdate, moiupdate, streakccdupdate))  # TODO needed?
         self._spot_stream.is_active.value = any((ccdupdate, spcupdate, moiupdate))
 
     def _onClickFocus(self, evt):
@@ -3543,8 +3760,219 @@ class Sparc2AlignTab(Tab):
         """
         self.tab_data_model.autofocus_active.value = not self.tab_data_model.autofocus_active.value
 
+    @call_in_wx_main  # TODO needed?
+    def _onOpenCalibFile(self, event):
+        """
+        Loads a calibration file (*csv) containing the time range and the corresponding trigger delay
+        for streak camera calibration.
+        """
+        logging.debug("Open trigger delay calibration file for temporal acquisition.")
+
+        path = get_picture_folder()
+
+        # TODO separate folder for calibration files?
+        # TODO if user specifies different folder store this one as default
+
+        dialog = wx.FileDialog(self.panel,
+                               message="Choose a calibration file to load",
+                               defaultDir=path,
+                               defaultFile="",
+                               style=wx.FD_OPEN,
+                               wildcard="csv files (*.csv)|*.csv")
+
+        # Show the dialog and check whether is was accepted or cancelled
+        if dialog.ShowModal() != wx.ID_OK:
+            return
+
+        # get a copy of the triggerDelay dict from MD
+        triggerDelay_dict = self.streak_delay.getMetadata()[model.MD_TIME_RANGE_TO_DELAY]
+
+        # get selected path + filename
+        path = dialog.GetPath()
+        filename = dialog.GetFilename()
+
+        # read file
+        with open(path, 'rb') as csvfile:
+            calibFile = csv.reader(csvfile, delimiter=':')
+            for row in calibFile:
+
+                timeRange, delay = (item for item in row)
+
+                try:
+                    timeRange = float(timeRange)
+                    delay = float(delay)
+                except:
+                    # update txt displayed in GUI
+                    self._onUpdateTriggerDelayGUI("Error", filename)
+                    raise ValueError("Trigger delay %s and/or time range %s is not of type float."
+                                     "Please check calibration file for trigger delay." % (delay, timeRange))
+
+                # check delay in range allowed
+                if not 0. <= delay <= 1.:
+                    # update txt displayed in GUI
+                    self._onUpdateTriggerDelayGUI("Error", filename)
+                    raise ValueError("Trigger delay %s corresponding to time range %s is not in range (0, 1)."
+                                     "Please check the calibration file for the trigger delay." % (delay, timeRange))
+
+                # check timeRange is in possible choices for timeRange on HW
+                choice = find_closest(timeRange, self.streak_unit.timeRange.choices)
+                if not almost_equal(timeRange, choice):
+                    # update txt displayed in GUI
+                    self._onUpdateTriggerDelayGUI("Error", filename)
+                    raise ValueError("Time range % s found in calibration file is not a possible choice"
+                                     "for the time range of the streak unit. "
+                                     "Please modify csv file so it fits the possible choices for the"
+                                     "time range of the streak unit."
+                                     "Values in file must be of format timeRange:triggerDelay (per line)."
+                                     % timeRange)
+
+                triggerDelay_dict[timeRange] = delay
+
+        # update the MD
+        self.streak_delay.updateMetadata({model.MD_TIME_RANGE_TO_DELAY: triggerDelay_dict})
+
+        # update txt displayed in GUI
+        self._onUpdateTriggerDelayGUI("Load", filename)
+
+        return
+
+    @call_in_wx_main  # TODO needed?
+    def _onSaveCalibFile(self, event):
+        """
+        Saves a calibration file (*csv) containing the time range and the corresponding trigger delay
+        for streak camera calibration.
+        """
+        logging.debug("Save trigger delay calibration file for temporal acquisition.")
+
+        path = get_picture_folder()
+
+        dialog = wx.FileDialog(self.panel,
+                               message="Choose a filename and destination to save the calibration file."
+                                       "It is advisory to include the SEM voltage into the filename.",
+                               defaultDir=path,
+                               defaultFile="",
+                               style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
+                               wildcard="csv files (*.csv)|*.csv")
+
+        # Show the dialog and check whether is was accepted or cancelled
+        if dialog.ShowModal() != wx.ID_OK:
+            return
+
+        # get path and filename for saving file
+        path = dialog.GetPath()
+        filename = dialog.GetFilename()
+
+        # get a copy of the triggerDelay dict from MD
+        triggerDelay_dict = self.streak_delay.getMetadata()[model.MD_TIME_RANGE_TO_DELAY]
+
+        with open(path, 'wb') as csvfile:
+            calibFile = csv.writer(csvfile, delimiter=':')
+            for key in triggerDelay_dict.keys():
+                calibFile.writerow([key, triggerDelay_dict[key]])
+
+        # update txt displayed in GUI
+        self._onUpdateTriggerDelayGUI("Save", filename)
+
+        return
+
+    def _onUpdateTriggerDelayGUI(self, mode, filename):
+        """
+        Updates the GUI elements regarding the new trigger delay value.
+        :parameter mode: (str) Save, Load or Status for display
+        :parameter filename: (str) filename of the loaded/saved file
+        """
+        if mode == "Load":
+            self.panel.txt_StreakCalibFilename.Value = "%s" % filename
+        elif mode == "Save":
+            self.panel.txt_StreakCalibFilename.Value = "%s" % filename
+        elif  mode == "Error":
+            self.panel.txt_StreakCalibFilename.Value = "Error while loading file!"
+            self.panel.txt_StreakCalibFilename.SetForegroundColour("#FFA300")
+            return
+        else:
+            self.panel.txt_StreakCalibFilename.Value = "Calibration not saved yet!"
+            self.panel.txt_StreakCalibFilename.SetForegroundColour("#FFA300")
+            return
+
+        # update triggerDelay shown in GUI
+        cur_timeRange = self.streak_unit.timeRange.value
+        new_triggerDelay = self.streak_delay.getMetadata()[model.MD_TIME_RANGE_TO_DELAY][cur_timeRange]
+        self.streak_delay.triggerDelay.value = new_triggerDelay
+        self.panel.txt_StreakCalibFilename.SetForegroundColour("#2FA7D4")
+
+    @call_in_wx_main  # TODO needed?
+    def _onManualfocus(self, active):
+        """Called when manual focus btn receives an event."""
+        # TODO need to handle all cases where focus is enabled/used
+        main = self.tab_data_model.main
+        bl = main.brightlight
+        align_mode = self.tab_data_model.align_mode.value
+
+        if self.panel.btn_manualfocus.GetValue():  # manual focus btn active
+            # switch on calibration light
+            # close slit spectrograph maximal
+            if align_mode == "streak-align":
+                s = None
+                opath = "streak-focus"
+            else:
+                logging.info("Manual focus requested not compatible streak camera mode."
+                             "Do nothing.")
+                return
+
+            # Go to the special focus mode (=> close the slit & turn on the lamp)
+            f = main.opm.setPath(opath)
+            f.add_done_callback(self._on_align_mode_done)
+
+            # force wavelength 0
+            self.spectrograph.moveAbsSync({"wavelength": 0})
+
+            if align_mode != "streak-align":
+                self._stream_controller.pauseStreams()
+
+            bl.power.value = bl.power.range[1]
+            if s:
+                s.should_update.value = True  # the stream will set all the emissions to 1
+            else:
+                bl.emissions.value = [1] * len(bl.emissions.value)
+
+            f.result()  # TODO: don't block the GUI => make it part of the manual focus??
+
+            # Enable slider for manual alignment of spectrograph focus
+            self.panel.btn_manualfocus.SetForegroundColour("#106090")
+            self.panel.slider_focus.Enable(True)
+
+            # # Disable autofocus if manual focus btn pushed
+            # self.panel.btn_autofocus.Enable(False)
+            # self.panel.gauge_autofocus.Enable(False)
+
+        else:  # manual focus button is inactive
+            # Go back to previous mode (=> open the slit & turn off the lamp)
+            if align_mode == "streak-align":
+                s = None
+
+            opath = self._mode_to_opm[align_mode]
+            f = main.opm.setPath(opath)
+            f.add_done_callback(self._on_align_mode_done)
+            f.result()  # TODO: don't block the GUI => make it part of the manual focus??
+
+            bl.power.value = bl.power.range[0]
+            if s:
+                s.should_update.value = True  # the stream will set all the emissions to 0
+            else:
+                bl.emissions.value = [0] * len(bl.emissions.value)
+
+            # Disable slider for manual alignment of spectrograph focus
+            self.panel.slider_focus.Enable(False)
+            self.panel.btn_manualfocus.SetForegroundColour("#111111")
+
+            # if align_mode != "streak-align":
+            #     # Enable autofocus if manual focus btn not pushed
+            #     self.panel.btn_autofocus.Enable(True)
+            #     self.panel.gauge_autofocus.Enable(True)
+
     @call_in_wx_main
     def _onAutofocus(self, active):
+        # TODO disable manual focus while running autofocus
         if active:
             main = self.tab_data_model.main
             align_mode = self.tab_data_model.align_mode.value
@@ -3701,6 +4129,8 @@ class Sparc2AlignTab(Tab):
         # autofocus was stopped due to changing mode, but it should end-up doing
         # just twice the same thing, with the second time being a no-op.
         self._onAlignMode(self.tab_data_model.align_mode.value)
+
+        # TODO enable manual focus when done running autofocus
 
     def _onBkgAcquire(self, evt):
         """
