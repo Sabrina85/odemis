@@ -17,11 +17,14 @@ You should have received a copy of the GNU General Public License along with Ode
 from __future__ import division
 
 import math
+import os
 from scipy.spatial import Delaunay as DelaunayTriangulation
 from scipy.interpolate import LinearNDInterpolator
 from numpy import ma
 import numpy
+import h5py as h5
 from odemis import model
+from odemis.model import MD_POL_HORIZONTAL, MD_POL_VERTICAL, MD_POL_POSDIAG, MD_POL_NEGDIAG, MD_POL_RHC, MD_POL_LHC
 # import matplotlib.pyplot as plt
 
 
@@ -448,4 +451,87 @@ def _CreateMirrorMask(data, pixel_size, pole_pos, offset_radius=0, hole=True):
 
     return circle_mask
 
+
+# # read inverse mumat from file
+# f = h5.File(os.path.join(os.path.dirname(__file__), "mumat_inv.h5"))
+# mumat_inv = f["mumat"]
+
+
+def Polarimetry(data, hole=False):
+    """
+    :parameter data: (array) raw polarimetry data of shape (x, y, 6) (6 polarization directions)
+    """
+
+    stokes_det = _StokesCalc_Detector(data)
+    # TODO check if to apply mirror mask beforehand
+    stokes_sample = _StokesCalc_Sample(stokes_det)  # TODO MD
+
+    # model.DataArray(qz, data.metadata)
+
+    return stokes_sample
+
+
+def _StokesCalc_Detector(data):
+    """
+    Function that calculates stokes parameters in the detector plane. Needs to be adapted to order of measurements
+    of polarization analyzer position.
+    :parameter data: (dict) 6 input images (detector data) recorded with different polarization analyzer positions.
+                    Shape is (x, y).
+    return (array): The 4 Stokes params in detector plane. Shape is (x, y, 4).
+    """
+
+    S0 = data[MD_POL_HORIZONTAL] + data[MD_POL_VERTICAL]
+    S1 = data[MD_POL_HORIZONTAL] - data[MD_POL_VERTICAL]
+    S2 = data[MD_POL_POSDIAG] - data[MD_POL_NEGDIAG]
+    S3 = data[MD_POL_RHC] - data[MD_POL_LHC]
+
+    stokes_det = numpy.dstack((S0, S1, S2, S3))
+
+    return stokes_det  # TODO dict?
+
+
+def _StokesCalc_Sample(stokes_det):
+
+    wl = 750e-9
+    wl_start = 700e-9
+    wl_step = 10e-9
+    wl_index = (wl - wl_start) / wl_step
+
+    stokes_sample = _MuellerCor_DetToSample_Inv(stokes_det, wl_index)
+
+    stokes_sample_dict = {}  # TODO global vars?
+    stokes_sample_dict["S0"] = model.DataArray(stokes_sample[:, :, 0], )
+    stokes_sample_dict["S1"] = model.DataArray(stokes_sample[:, :, 1], )
+    stokes_sample_dict["S2"] = model.DataArray(stokes_sample[:, :, 2], )
+    stokes_sample_dict["S3"] = model.DataArray(stokes_sample[:, :, 3], )
+
+    return stokes_sample_dict
+
+
+def _MuellerCor_DetToSample_Inv(stokes_det, wl_index):
+    """Apply the Mueller correction to go from detector plane to sample plane.
+    This requires the inverse of the Mueller matrix.
+    stokes_det: stokes params for detector plane. Shape is (x, y, 4).
+    mumat: mueller matrix for specific wavelength. Shape is (x, y, 4, 4)
+    return: stokes params for sample plane. Shape is (x, y, 4, 4)
+    """
+
+    # read inverse mumat from file
+    f = h5.File(os.path.join(os.path.dirname(__file__), "mumat_inv.h5"))
+    mumat_inv = f["mumat"]
+
+    mumat_inv_wl = mumat_inv[:, :, :, :, wl_index]
+
+    stokes_sample = numpy.empty([stokes_det.shape[0], stokes_det.shape[1], 4], dtype="float64")
+
+    # TODO get rid of for loops? use numpy?
+    for ii in range(stokes_sample.shape[0]):
+        for jj in range(stokes_sample.shape[1]):
+            stokes_sample[ii, jj, :] = numpy.dot(mumat_inv_wl[ii, jj, :, :], stokes_det[ii, jj, :])
+#           Stokes_sample1[ii,jj,:] = np.linalg.lstsq(mumat[ii,jj,:,:],Stokes_det1[ii,jj,:])[0]
+#           # these approaches seem equivalent. Check this. First one seems more straightforward.
+
+    # stokes_sample = numpy.einsum('ijkl,ijl->ijk', mumat_inv, stokes_det)  # TODO
+
+    return stokes_sample
 

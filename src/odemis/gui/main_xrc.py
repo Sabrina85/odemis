@@ -450,6 +450,7 @@ class xrcpnl_tab_inspection(wx.Panel):
         self.vp_angular = xrc.XRCCTRL(self, "vp_angular")
         self.vp_inspection_plot = xrc.XRCCTRL(self, "vp_inspection_plot")
         self.vp_spatialspec = xrc.XRCCTRL(self, "vp_spatialspec")
+        self.vp_angular_pol = xrc.XRCCTRL(self, "vp_angular_pol")
         self.main_buttons = xrc.XRCCTRL(self, "main_buttons")
         self.scr_win_right = xrc.XRCCTRL(self, "scr_win_right")
         self.fp_fileinfo = xrc.XRCCTRL(self, "fp_fileinfo")
@@ -4655,6 +4656,12 @@ def __init_resources():
             </XRCED>
           </object>
           <object class="SpatialSpectrumViewport" name="vp_spatialspec">
+            <hidden>1</hidden>
+            <XRCED>
+              <assign_var>1</assign_var>
+            </XRCED>
+          </object>
+          <object class="AngularResolvedViewport" name="vp_angular_pol">
             <hidden>1</hidden>
             <XRCED>
               <assign_var>1</assign_var>

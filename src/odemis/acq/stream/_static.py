@@ -33,7 +33,8 @@ import numpy
 import copy
 from odemis import model
 from odemis.acq import calibration
-from odemis.model import MD_POS, MD_POL_MODE, MD_POL_NONE, MD_PIXEL_SIZE, VigilantAttribute
+from odemis.model import MD_POS, MD_POL_MODE, MD_POL_NONE, MD_PIXEL_SIZE, VigilantAttribute,\
+                         MD_POL_HORIZONTAL, MD_POL_VERTICAL, MD_POL_POSDIAG, MD_POL_NEGDIAG, MD_POL_RHC, MD_POL_LHC
 from odemis.util import img, conversion, polar, spectrum
 from scipy import ndimage
 import threading, weakref, time
@@ -374,19 +375,21 @@ class StaticARStream(StaticStream):
         # (float, float, str or None)) -> DataArray: position on SEM + polarization -> data
         self._pos = {}
         self._sempos = {}
-        polpos = set()
+        self.polpos = set()
         for d in data:
             try:
                 self._pos[d.metadata[MD_POS] + (d.metadata.get(MD_POL_MODE, None),)] = img.ensure2DImage(d)
                 self._sempos[d.metadata[MD_POS]] = img.ensure2DImage(d)
                 if MD_POL_MODE in d.metadata:
-                    polpos.add(d.metadata.get(MD_POL_MODE))
+                    self.polpos.add(d.metadata.get(MD_POL_MODE))
             except KeyError:
                 logging.info("Skipping DataArray without known position")
 
         # Cached conversion of the CCD image to polar representation
         # TODO: automatically fill it in a background thread
         self._polar = {}  # dict tuple 2 floats -> DataArray
+        # Cached conversion of the raw 6 polarization images to Stokes parameters in the sample plane (4 images)
+        self._stokes = {}
 
         # SEM position VA
         # SEM position displayed, (None, None) == no point selected (x, y)
@@ -409,12 +412,19 @@ class StaticARStream(StaticStream):
         # no need for init=True, as Stream.__init__ will update the image
         self.point.subscribe(self._onPoint)
 
-        # polarization VA
+        # polarization VA, degree of polarization VA (DOP)
         # check if any polarization analyzer data, (None) == no analyzer data (pol)
         if self._pos.keys()[0][-1]:
             # use first entry in acquisition to populate VA (acq could have 1 or 6 pol pos)
-            self.polarization = model.VAEnumerated(self._pos.keys()[0][-1],
-                                choices=polpos)
+            self.polarization = model.VAEnumerated(self._pos.keys()[0][-1], choices=self.polpos)
+
+            # Stokes parameters sample plane
+            stokesParams = {"S0", "S1", "S2", "S3"}
+            self.stokesParams = model.VAEnumerated("S0", choices=stokesParams)
+
+            # degree of polarization
+            dop = {"non-polarized", "DOP", "DOLP", "DOCP"}
+            self.degreePolarization = model.VAEnumerated("non-polarized", choices=dop)
 
         if self._pos.keys()[0][-1]:
             self.polarization.subscribe(self._onPolarization)
@@ -422,6 +432,8 @@ class StaticARStream(StaticStream):
         if "acq_type" not in kwargs:
             kwargs["acq_type"] = model.MD_AT_AR
         super(StaticARStream, self).__init__(name, list(self._pos.values()), *args, **kwargs)
+
+        # self.__delattr__("image")   # remove .image VA to use projections in views  # TODO projections
 
     def _project2Polar(self, pos):
         """
@@ -485,6 +497,81 @@ class StaticARStream(StaticStream):
 
         return polard
 
+    def _project2StokesParam(self, pos):
+        """
+        Return the stokes parameter of the stokes vector for all angles at a given ebeam position.
+        pos (float, float, string or None): position (must be part of the ._pos)
+        returns DataArray: the stokes parameter projection
+        """
+        if pos[0:2] in self._stokes:
+            stokes = self._stokes[pos[0:2]]
+        else:
+            # Compute the stokes vectors in the sample plane
+            # Get the 6 images with the different polarisation position for the selected ebeam position
+            try:
+                pos_ebeam = pos[0:2]
+                dataset = {}
+                for pol in (MD_POL_VERTICAL, MD_POL_HORIZONTAL, MD_POL_NEGDIAG, MD_POL_POSDIAG, MD_POL_RHC, MD_POL_LHC):
+                    dataset[pol] = (self._pos[pos_ebeam + (pol,)])
+            except:
+                logging.debug("Only one polarization position found for ebeam position requested. Cannot compute"
+                              "Stokes parameters for representation.")
+                return
+
+            try:
+                # if numpy.prod(dataset.shape) > (1280 * 1080):
+                #     # AR conversion fails with very large images due to too much
+                #     # memory consumed (> 2Gb). So, rescale + use a "degraded" type that
+                #     # uses less memory. As the display size is small (compared
+                #     # to the size of the input image, it shouldn't actually
+                #     # affect much the output.
+                #     logging.info("AR image is very large %s, will convert to "
+                #                  "azimuthal projection in reduced precision.",
+                #                  dataset.shape)
+                #     y, x = dataset[0].shape
+                #     if y > x:
+                #         small_shape = 1024, int(round(1024 * x / y))
+                #     else:
+                #         small_shape = int(round(1024 * y / x)), 1024
+                #     # resize
+                #     for index, data in enumerate(dataset):
+                #         dataset[index] = img.rescale_hq(data, small_shape)
+                #     dtype = numpy.float16
+                # else:
+                #     dtype = None  # just let the function use the best one
+
+                # 2 x size of original image (on smallest axis) and at most
+                # the size of a full-screen canvas
+                # size = min(min(dataset[0].shape) * 2, 1134)
+
+                # TODO
+                # # TODO: First compute quickly a low resolution and then
+                # # compute a high resolution version.
+                # # TODO: could use the size of the canvas that will display
+                # # the image to save some computation time.
+                #
+                # # Get bg image, if existing. It must match the polarization (defaulting to MD_POL_NONE).
+                # bg_image = self._getBackground(data.metadata.get(MD_POL_MODE, MD_POL_NONE))
+                # #
+                # if bg_image is None:
+                #     # Simple version: remove the background value
+                #     data0 = polar.ARBackgroundSubtract(data)
+                # else:
+                #     data0 = img.Subtract(data, bg_image)  # metadata from data
+
+                # Warning: allocates lot of memory, which will not be free'd until
+                # the current thread is terminated.
+                stokes = polar.Polarimetry(dataset, hole=False) #, dtype=dtype)
+
+                # TODO: don't hold too many of them in cache (eg, max 3 * 1134**2)
+                # Note: Need to calculate all Stokes parameters anyways so cache them all
+                self._stokes[pos_ebeam] = stokes
+            except Exception:
+                logging.exception("Failed to convert to azimuthal projection")
+                return dataset  # display it raw as fallback  # TODO
+
+        return stokes
+
     def _getBackground(self, pol_mode):
         """
         Get background image from background VA
@@ -531,14 +618,18 @@ class StaticARStream(StaticStream):
                 else:
                     pol = None
                 polard = self._project2Polar(pos + (pol,))
+                # if pol:  # TODO handle if no stokes params can be calc
+                #     polard = self._project2StokesParam(pos + (pol,))  # TODO might be possible to do this without pol when projections ready
+                #     stokes_pos = self.stokesParams.value
+
                 # update the histogram
                 # TODO: cache the histogram per image
                 # FIXME: histogram should not include the black pixels outside
                 # of the circle. => use a masked array?
                 # reset the drange to ensure that it doesn't depend on older data
                 self._drange = None
-                self._updateHistogram(polard)
-                self.image.value = self._projectXY2RGB(polard)
+                self._updateHistogram(polard) #[stokes_pos])
+                self.image.value = self._projectXY2RGB(polard) #[stokes_pos])  # TODO check MD
         except Exception:
             logging.exception("Updating %s image", self.__class__.__name__)
 

@@ -29,9 +29,12 @@ import logging
 import time
 import math
 import gc
+import numpy
 
 from odemis import model
-from odemis.util import img
+from odemis.util import img, polar
+
+from odemis.model import MD_POL_MODE, MD_POL_NONE
 
 
 class DataProjection(object):
@@ -426,3 +429,219 @@ class RGBSpatialProjection(DataProjection):
 
         except Exception:
             logging.exception("Updating %s %s image", self.__class__.__name__, self.name.value)
+
+
+class ARPolarimetryProjection(RGBSpatialProjection):
+
+    def __init__(self, stream):
+        '''
+        stream (Stream): the Stream to project
+        '''
+
+        # polarization VA, degree of polarization VA (DOP)
+        # check if any polarization analyzer data, (None) == no analyzer data (pol)
+        if self.stream._pos.keys()[0][-1]:
+            # use first entry in acquisition to populate VA (acq could have 1 or 6 pol pos)
+            self.polarization = model.VAEnumerated(self.stream._pos.keys()[0][-1], choices=stream.polpos)
+
+            # degree of polarization
+            dop = {"non-polarized", "DOP", "DOLP", "DOCP"}
+            self.degreePolarization = model.VAEnumerated("non-polarized", choices=dop)
+
+        if self.stream._pos.keys()[0][-1]:
+            self.polarization.subscribe(self._onPolarization)
+
+        super(ARPolarimetryProjection, self).__init__(stream)
+
+    def _project2Polar(self, pos):
+        """
+        Return the polar projection of the image at the given position.
+        pos (float, float, string or None): position (must be part of the ._pos)
+        returns DataArray: the polar projection
+        """
+        if pos in self._polar:
+            polard = self._polar[pos]
+        else:
+            # Compute the polar representation
+            data = self._pos[pos]
+            try:
+                if numpy.prod(data.shape) > (1280 * 1080):
+                    # AR conversion fails with very large images due to too much
+                    # memory consumed (> 2Gb). So, rescale + use a "degraded" type that
+                    # uses less memory. As the display size is small (compared
+                    # to the size of the input image, it shouldn't actually
+                    # affect much the output.
+                    logging.info("AR image is very large %s, will convert to "
+                                 "azimuthal projection in reduced precision.",
+                                 data.shape)
+                    y, x = data.shape
+                    if y > x:
+                        small_shape = 1024, int(round(1024 * x / y))
+                    else:
+                        small_shape = int(round(1024 * y / x)), 1024
+                    # resize
+                    data = img.rescale_hq(data, small_shape)
+                    dtype = numpy.float16
+                else:
+                    dtype = None  # just let the function use the best one
+
+                # 2 x size of original image (on smallest axis) and at most
+                # the size of a full-screen canvas
+                size = min(min(data.shape) * 2, 1134)
+
+                # TODO: First compute quickly a low resolution and then
+                # compute a high resolution version.
+                # TODO: could use the size of the canvas that will display
+                # the image to save some computation time.
+
+                # Get bg image, if existing. It must match the polarization (defaulting to MD_POL_NONE).
+                bg_image = self._getBackground(data.metadata.get(MD_POL_MODE, MD_POL_NONE))
+
+                if bg_image is None:
+                    # Simple version: remove the background value
+                    data0 = polar.ARBackgroundSubtract(data)
+                else:
+                    data0 = img.Subtract(data, bg_image)  # metadata from data
+
+                # Warning: allocates lot of memory, which will not be free'd until
+                # the current thread is terminated.
+                polard = polar.AngleResolved2Polar(data0, size, hole=False, dtype=dtype)
+
+                # TODO: don't hold too many of them in cache (eg, max 3 * 1134**2)
+                self._polar[pos] = polard
+            except Exception:
+                logging.exception("Failed to convert to azimuthal projection")
+                return data  # display it raw as fallback
+
+        return polard
+
+    def _getBackground(self, pol_mode):
+        """
+        Get background image from background VA
+        :param pol_mode: metadata
+        :return: (DataArray or None): the background image corresponding to the given polarization,
+                 or None, if no background corresponds.
+        """
+        bg_data = self.background.value  # list containing DataArrays, DataArray or None
+
+        if bg_data is None:
+            return None
+
+        if isinstance(bg_data, model.DataArray):
+            bg_data = [bg_data]  # convert to list of bg images
+
+        for bg in bg_data:
+            # if no analyzer hardware, set MD_POL_MODE = "pass-through" (MD_POL_NONE)
+            if bg.metadata.get(MD_POL_MODE, MD_POL_NONE) == pol_mode:
+                # should be only one bg image with the same metadata entry
+                return bg  # DataArray
+
+        # Nothing found e.g. pol_mode = "rhc" but no bg image with "rhc"
+        logging.debug("No background image with polarization mode %s ." % pol_mode)
+        return None
+
+    def _find_metadata(self, md):
+        # For polar view, no PIXEL_SIZE nor POS
+        return {}
+
+    def _updateImage(self):
+        """ Recomputes the image with all the raw data available for the current
+        selected point.
+        """
+        if not self.raw:
+            return
+
+        pos = self.point.value
+        try:
+            if pos == (None, None):
+                self.image.value = None
+            else:
+                if self._pos.keys()[0][-1]:
+                    pol = self.polarization.value
+                else:
+                    pol = None
+                polard = self._project2Polar(pos + (pol,))
+                # update the histogram
+                # TODO: cache the histogram per image
+                # FIXME: histogram should not include the black pixels outside
+                # of the circle. => use a masked array?
+                # reset the drange to ensure that it doesn't depend on older data
+                self._drange = None
+                self._updateHistogram(polard)
+                self.image.value = self._projectXY2RGB(polard)
+        except Exception:
+            logging.exception("Updating %s image", self.__class__.__name__)
+
+    def _onPolarization(self, pos):
+        self._shouldUpdateImage()
+
+    def _setBackground(self, bg_data):
+        """
+        Called when the background is about to be changed
+        :param bg_data: (None, DataArray or list of DataArrays) background image(s)
+        :return: (None, DataArray or list of DataArrays)
+        :raises: (ValueError) the background data is not compatible with the data
+                 (ex: incompatible resolution (shape), encoding (data type), format (bits),
+                 polarization of images).
+        """
+        if bg_data is None:
+            # simple baseline background value will be subtracted
+            return bg_data
+
+        isDataArray = False
+        if isinstance(bg_data, model.DataArray):
+            bg_data = [bg_data]
+            isDataArray = True
+
+        bg_data = [img.ensure2DImage(d) for d in bg_data]
+
+        for d in bg_data:
+            # TODO check if MD_AR_POLE in MD? will fail in set_ar_background anyways,
+            # but maybe nicer to check here already
+            arpole = d.metadata[model.MD_AR_POLE]  # we expect the data has AR_POLE
+
+            # TODO: allow data which is the same shape but lower binning by
+            # estimating the binned image
+            # Check the background data and all the raw data have the same resolution
+            # TODO: how to handle if the .raw has different resolutions?
+            for r in self.raw:
+                if d.shape != r.shape:
+                    raise ValueError("Incompatible resolution of background data "
+                                     "%s with the angular resolved resolution %s." %
+                                     (d.shape, r.shape))
+                if d.dtype != r.dtype:
+                    raise ValueError("Incompatible encoding of background data "
+                                     "%s with the angular resolved encoding %s." %
+                                     (d.dtype, r.dtype))
+                try:
+                    if d.metadata[model.MD_BPP] != r.metadata[model.MD_BPP]:
+                        raise ValueError(
+                            "Incompatible format of background data "
+                            "(%d bits) with the angular resolved format "
+                            "(%d bits)." %
+                            (d.metadata[model.MD_BPP], r.metadata[model.MD_BPP]))
+                except KeyError:
+                    pass  # no metadata, let's hope it's the same BPP
+
+                # check the AR pole is at the same position
+                if r.metadata[model.MD_AR_POLE] != arpole:
+                    logging.warning("Pole position of background data %s is "
+                                    "different from the data %s.",
+                                    arpole, r.metadata[model.MD_AR_POLE])
+
+                if MD_POL_MODE in r.metadata:  # check if we have polarization analyzer hardware present
+                    # check if we have at least one bg image with the corresponding MD_POL_MODE to the image data
+                    if not any(bg_im.metadata[MD_POL_MODE] == r.metadata[MD_POL_MODE] for bg_im in bg_data):
+                        raise ValueError("No AR background with polarization %s" % r.metadata[MD_POL_MODE])
+
+        if isDataArray:
+            return bg_data[0]
+        else:  # list
+            return bg_data
+
+    def _onBackground(self, data):
+        """Called after the background has changed"""
+        # uncache all the polar images, and update the current image
+        self._polar = {}
+        super(ARPolarimetryProjection, self)._onBackground(data)
+

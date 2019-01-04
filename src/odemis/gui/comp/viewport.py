@@ -873,6 +873,10 @@ class AngularResolvedViewport(ViewPort):
             self.update_legend_pol_choices()
             self.stream.polarization.subscribe(self.on_va_pol_change)
             self.bottom_legend.Show(True)
+            # get degree of polarization and set callback fct
+            # self.update_legend_degreepol_choices()
+            # # self.stream.degreePolarization.subscribe(self.on_va_pol_change)  # TODO
+            # self.bottom_legend.Show(True)
         # if no polarization VA or if no stream (= None)
         else:
             # clear legend and also automatically drop callback
@@ -903,6 +907,16 @@ class AngularResolvedViewport(ViewPort):
         """
         choices = self.stream.polarization.choices
         default = self.stream.polarization.value
+        self.bottom_legend.set_pol_entries(choices, default)
+
+    def update_legend_degreepol_choices(self):
+        """
+        Get the choices of the degree of polarization VA.
+        Set the callback function in the legend, which should be called when a different
+        degree of polarization is requested.
+        """
+        choices = self.stream.degreePolarization.choices
+        default = self.stream.degreePolarization.value
         self.bottom_legend.set_pol_entries(choices, default)
 
 

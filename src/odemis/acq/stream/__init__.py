@@ -88,6 +88,7 @@ class ARStream:
 ARStream.register(ARSettingsStream)
 ARStream.register(StaticARStream)
 ARStream.register(SEMARMDStream)
+ARStream.register(ARPolarimetryProjection)
 
 NON_SPATIAL_STREAMS = (ARStream, SpectrumStream, TemporalSpectrumStream, MonochromatorSettingsStream,
                        ScannedTCSettingsStream, ScannedFluoMDStream, OverlayStream)

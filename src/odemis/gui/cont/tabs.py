@@ -1638,6 +1638,10 @@ class AnalysisTab(Tab):
              {"name": "Spatial spectrum",
               "stream_classes": (SpectrumStream, CLStream),
               }),
+            (viewports[7],
+             {"name": "Angle-resolved-pol",  # DOP: degree of polarization
+              "stream_classes": ARStream,
+              }),
         ])
 
         self.view_controller = viewcont.ViewPortController(tab_data, panel, vpv)
@@ -1784,6 +1788,7 @@ class AnalysisTab(Tab):
             self.panel.vp_inspection_plot.clear()
             self.panel.vp_spatialspec.clear()
             self.panel.vp_angular.clear()
+            self.panel.vp_angular_pol.clear()
 
         gc.collect()
         if filename is None:
@@ -1884,10 +1889,21 @@ class AnalysisTab(Tab):
 
             # ########### Combined views and Angular view visible
 
+            pol = False
+            for ar_stream in ar_streams:  # TODO multiple ar_streams possible?? does that make sense??
+                # if ar_stream._pos.keys()[0][-1]:  # TODO
+                if hasattr(ar_stream, "polarization"):
+                    pol = True
+                    break
+
             new_visible_views[0] = self._def_views[1] # SEM only
             new_visible_views[1] = self._def_views[2] # Combined 1
             new_visible_views[2] = self.panel.vp_angular.view
-            new_visible_views[3] = self._def_views[3] # Combined 2
+
+            if pol:
+                new_visible_views[3] = self.panel.vp_angular_pol.view
+            else:
+                new_visible_views[3] = self._def_views[3] # Combined 2
 
             # ########### Update tool menu
 
