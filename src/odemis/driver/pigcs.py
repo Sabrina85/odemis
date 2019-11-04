@@ -375,7 +375,7 @@ class Controller(object):
     def __init__(self, busacc, address=None, axes=None, _stem=False):
         """
         busacc: a BusAccesser
-        address (None or 1<=int<=16): address as configured on the controller
+        address (None or 1<=int<=16): address as configured on the controller # TODO still up to date? 254
         axes (dict int -> boolean): determine which axis will be used and whether
           it will be used closed-loop (True) or open-loop (False).
         _stem (bool): just allows to do some raw commands, and changing address
@@ -622,7 +622,7 @@ class Controller(object):
          used to describe it (typically: 0 1 FLOAT description)
         """
         # HPA? (Get List Of Available Parameters)
-        lines = self._sendQueryCommand("HPA?\n")
+        lines = self._sendQueryCommand("HPA?\n")  # TODO: for PIGCS C-867 need to pass module e.g. 2 HPA? or 3 HPA? How does it work for other PIs?
         lines[0] = lines[0].lstrip("\x00")
         params = {}
         # first and last lines are typically just user-friendly text
@@ -996,7 +996,6 @@ class Controller(object):
         assert(axis in self._channels)
 
         if absolute:
-            assert(self._hasLimitSwitches[axis] or self._hasRefSwitch[axis])
             state = 1
         else:
             state = 0
@@ -1830,10 +1829,7 @@ class CLRelController(Controller):
     if the controller is powered while the axis is at a limit, to reach the other
     limit, it would need to travel the entire range in a direction.
     """
-#     TODO: For now, only relative moves are supported.
-#           For supporting absolute moves, we need to add querying and requesting
-#           "homing" procedure. Then the position would reset to 0 (and that's it
-#           from the user's point of view).
+
     def __init__(self, busacc, address=None, axes=None, auto_suspend=10, suspend_mode="read"):
         """
         auto_suspend (False or 0 < float): delay before stopping the servo (and
@@ -1912,7 +1908,7 @@ class CLRelController(Controller):
                 # we will use the correct values.
                 self._pid = tuple(int(self.GetParameterNonVolatile(a, p)) for p in (1, 2, 3))
                 # Activate the servo from now on
-                self._startServo(a)
+                self._startServo(a)  # TODO here already called SetRefMode which does fake referencing
 
                 if self._auto_suspend:
                     logging.info("Will use PID = 0,0,0 when axis not in use")
@@ -1971,6 +1967,22 @@ class CLRelController(Controller):
             self._encoder_mng[a] = t
             t.start()
 
+            # TODO: check if we can do referencing here already or if we first have to set the suspend_mode.
+            #   If first needed, then we need to first do the referencing before calling StartServo
+            #   for suspend_mode = "read".
+            # Referencing:
+            # When sending the 'RON' command with False (RON disabled), the axes are not actually referenced.
+            # When setting a position (SetPosition()) with RON disabled ("RON", False), the axis will report
+            # to be referenced, though it is actually not. This allows to move without referencing beforehand.
+            # To allow (absolute) moves, even if it's not actually referenced: pass False
+            # To do proper referencing, check if has reference limits and/or switch: pass True
+            # TODO Eric: Is there a situation where we explicitly want to pass False here even
+            #  if we have a reference switch/limits?
+            #  Is there any controller operated in closed-loop but without ref sensor?
+            self.SetReferenceMode(a, self._hasLimitSwitches[a] or self._hasRefSwitch[a])
+            if self._hasLimitSwitches[a] or self._hasRefSwitch[a]:
+                self.startReferencing(a)
+
         self._prev_speed_accel = ({}, {})
 
     def terminate(self):
@@ -2023,7 +2035,7 @@ class CLRelController(Controller):
 
     def _startServo(self, axis):
         """
-        Turn on the servo and the suplly power of the encoder.
+        Turn on the servo and the power supply of the encoder.
         axis (str): the axis
         """
         with self._pos_lock[axis]:
@@ -2037,8 +2049,6 @@ class CLRelController(Controller):
                 self.SetParameter(axis, 0x56, 1, check=False)  # 1 = on
                 time.sleep(2)  # 2 s seems long enough for the encoder to initialise
             self.SetServo(axis, True)
-            # To allow (relative) moves, even if it's not actually referenced
-            self.SetReferenceMode(axis, False)
             if 0x56 in self._avail_params:
                 self.SetPosition(axis, pos)
             if axis in self._slew_rate:
@@ -2405,6 +2415,8 @@ class CLRelController(Controller):
         # Note: setting position only works if ron is disabled. It's possible
         # also to indirectly set it after referencing, but then it will conflict
         # with TMN/TMX and some correct moves will fail.
+        # TODO why would you send the RON command again after referencing. We tested to set
+        #  a position after referencing and it worked fine
         # So referencing could look like:
         # ron 1 1
         # frf -> go home and now know the position officially
@@ -3070,16 +3082,60 @@ class Bus(model.Actuator):
         return f
     moveAbs.__doc__ = model.Actuator.moveAbs.__doc__
 
-    # TODO reference(self, axes)
-#     @isasync
-#     def reference(self, axes):
-#         if not axes:
-#             return model.InstantaneousFuture()
-#         self._checkReference(axes)
-#
-#         f = self._executor.submit(self._doReference, axes)
-#         return f
-#     reference.__doc__ = model.Actuator.reference.__doc__
+    @isasync
+    def reference(self, axes):
+        if not axes:
+            return model.InstantaneousFuture()
+        self._checkReference(axes)
+
+        f = self._createFuture(axes, False)
+        f = self._executor.submitf(f, self._doReference, f, axes)
+
+        return f
+    reference.__doc__ = model.Actuator.reference.__doc__
+
+    def _doReference(self, future, axes):
+        """
+        Actually runs the referencing code
+        axes (set of str)
+        raise:
+            IOError: if referencing failed due to hardware
+            CancelledError if was cancelled
+        """
+        # Reset reference so that if it fails, it states the axes are not
+        # referenced (anymore)
+        with future._moving_lock:
+            try:
+                # do the referencing for each axis sequentially
+                # (because each referencing is synchronous)
+                for a in axes:
+                    if future._must_stop.is_set():
+                        raise CancelledError()
+                    controller, channel = self._axis_to_cc[a]
+                    self.referenced._value[a] = False
+                    controller.startReferencing(channel)
+                    self._waitEndMove(future, (a,), time.time() + 100)  # block until it's over
+                    # self.SetHome(channel, 0.0)  # set negative limit as origin # TODO do similar thing
+                    # controller.getPosition("1")  # TODO is incorrect, should be 0 after referencing??
+                    self.referenced._value[a] = True
+            except CancelledError:
+                # TODO how does this work for the pigcs?? test!
+                # FIXME: if the referencing is stopped, the device refuses to
+                # move until referencing is run (and successful).
+                # => Need to put back the device into a mode where at least
+                # relative moves work.
+                logging.warning("Referencing cancelled, device will not move until another referencing")
+                future._was_stopped = True
+                raise
+            except Exception:
+                logging.exception("Referencing failure")
+                raise
+            finally:
+                # We only notify after updating the position so that when a listener
+                # receives updates both values are already updated.
+                self._updatePosition(axes)  # all the referenced axes should be back to 0
+                # read-only so manually notify
+                self.referenced.notify(self.referenced.value)
 
     def stop(self, axes=None):
         """
@@ -3158,7 +3214,7 @@ class Bus(model.Actuator):
                 for an, v in pos.items():
                     moving_axes.add(an)
                     controller, channel = self._axis_to_cc[an]
-                    dist = controller.moveAbs(channel, v)
+                    dist = controller.moveAbs(channel, v)  # TODO if in closed loop aka needs referencing do referencing before absMove or at init
                     # compute expected end
                     dur = driver.estimateMoveDuration(abs(dist),
                                                       controller.getSpeed(channel),
@@ -3707,7 +3763,7 @@ class IPBusAccesser(object):
     def sendQueryCommand(self, addr, com):
         """
         Send a command and return its report (raw)
-        addr (None or 1<=int<=16): address of the controller
+        addr (None or 1<=int<=16): address of the controller # TODO outdated master
         com (str or list of str): the command(s) to send (without address prefix but with \n)
         return (string or list of strings): the report without prefix
            (e.g.,"0 1") nor newline.
@@ -3860,6 +3916,7 @@ class E861Simulator(object):
     """
     _idn = b"(c)2013 Delmic Fake Physik Instrumente(PI) Karlsruhe, E-861 Version 7.2.0"
     _csv = b"2.0"
+
     def __init__(self, port, baudrate=9600, timeout=0, address=1,
                  closedloop=False, *args, **kwargs):
         """
