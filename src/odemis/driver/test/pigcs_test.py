@@ -41,7 +41,7 @@ logging.basicConfig(format="%(asctime)s  %(levelname)-7s %(module)s:%(lineno)d %
 # Export TEST_NOHW=1 to force using only the simulator and skipping test cases
 # needing real hardware
 TEST_NOHW = (os.environ.get("TEST_NOHW", 0) != 0)  # Default to Hw testing
-TEST_NOHW = 1
+TEST_NOHW = 0
 if os.name == "nt":
     PORT = "COM1"
 else:
@@ -606,7 +606,7 @@ class TestActuator(unittest.TestCase):
 class TestActuatorCL(TestActuator):
     def setUp(self):
         self.kwargs = KWARGS_CL
-        self.kwargs_two = KWARGS_TWO_CL
+        self.kwargs_two = KWARGS_TWO_CL_REAL
 
     #    @skip("faster")
     def test_reference(self):
@@ -614,26 +614,6 @@ class TestActuatorCL(TestActuator):
         Test referencing for 2 axes.
         """
         stage = CLASS(**self.kwargs_two)
-        # move = {'x': 0.01e-6}
-        # orig_pos = stage.position.value["x"]
-        # f = stage.moveRel(move)
-        # f.result()  # wait for the move to finish
-        #
-        # self.assertAlmostEqual(orig_pos + move["x"], stage.position.value["x"])
-        # stage.terminate()
-
-        # Test cancellation of referencing
-        # stage.updateMetadata({model.MD_POS_COR: {'x': 0}})
-        # stage.moveAbs({'x': 0.0125}).result()
-        # f = stage.reference({'x'})
-        # # time.sleep(0.000001)
-        # f.cancel()
-        # self.assertFalse(stage.referenced.value['x'])
-        # self.assertNotEqual(stage.position.value['x'], 0)
-
-        # TODO: NOTE!!! If homing aborts, you MUST run referencing again. Otherwise,
-        # the controller will be stuck and won't do anything!
-        # TODO also true for pigcs ?
 
         # Test proper referencing
         self.assertTrue(stage.referenced.value['x'])
@@ -641,18 +621,30 @@ class TestActuatorCL(TestActuator):
         pos = stage.position.value
         # self.assertFalse(stage.referenced.value['x'])
         # stage.moveRel({'x': 0.0001}).result()  # move to position different from 0
-        stage.moveAbs({'x': 0.001}).result()
+        stage.moveAbs({'x': 0.015}).result()
         stage.moveAbs({'y': 0.005}).result()
-        self.assertAlmostEqual(stage.position.value['x'], 0.001, places=3)
+        self.assertAlmostEqual(stage.position.value['x'], 0.015, places=3)  # 0.001 times out
         self.assertAlmostEqual(stage.position.value['y'], 0.005, places=3)
         self.assertNotAlmostEqual(stage.position.value['x'], pos["x"], places=3)
 
         stage.reference({'x'}).result()
         self.assertTrue(stage.referenced.value['x'])
-        time.sleep(0.1)
         # The new position should be 12.5 for simulator
         # TODO check if simulator is doing the correct thing for ref!!
-        self.assertAlmostEqual(stage.position.value["x"], 0.012, places=3)
+        self.assertAlmostEqual(stage.position.value["x"], 0.0125, places=3)
+
+        stage.reference({'y'}).result()
+        self.assertTrue(stage.referenced.value['y'])
+        self.assertAlmostEqual(stage.position.value["y"], 0.0125, places=3)
+
+        # Test cancellation of referencing
+        self.assertTrue(stage.referenced.value['x'])  # check it is referenced
+        stage.moveAbs({'x': 0.018}).result()
+        f = stage.reference({'x'})
+        time.sleep(0.01)
+        f.cancel()
+        self.assertFalse(stage.referenced.value['x'])  # check it is no longer referenced
+        self.assertNotAlmostEqual(stage.position.value["x"], 0.0125, places=3)
 
 
 # @skip("faster")

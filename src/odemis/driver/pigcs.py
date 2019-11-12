@@ -974,7 +974,7 @@ class Controller(object):
         assert(axis in self._channels)
 
         if activated:
-            # assert(self._hasRefSwitch[axis])
+            # assert(self._hasRefSwitch[axis])  # TODO use this? use closed loop only if refswitch or reflimits?
             state = 1
         else:
             state = 0
@@ -1908,7 +1908,7 @@ class CLRelController(Controller):
                 # we will use the correct values.
                 self._pid = tuple(int(self.GetParameterNonVolatile(a, p)) for p in (1, 2, 3))
                 # Activate the servo from now on
-                self._startServo(a)  # TODO here already called SetRefMode which does fake referencing
+                self._startServo(a)
 
                 if self._auto_suspend:
                     logging.info("Will use PID = 0,0,0 when axis not in use")
@@ -1967,9 +1967,8 @@ class CLRelController(Controller):
             self._encoder_mng[a] = t
             t.start()
 
-            # TODO: check if we can do referencing here already or if we first have to set the suspend_mode.
-            #   If first needed, then we need to first do the referencing before calling StartServo
-            #   for suspend_mode = "read".
+            # TODO: Check if there was any need to send the RON command via SetReferenceMode in the startServo method.
+            #  @Eric was there any reason for this? It seems to work fine in the tests without.
             # Referencing:
             # When sending the 'RON' command with False (RON disabled), the axes are not actually referenced.
             # When setting a position (SetPosition()) with RON disabled ("RON", False), the axis will report
@@ -1981,6 +1980,9 @@ class CLRelController(Controller):
             #  Is there any controller operated in closed-loop but without ref sensor?
             self.SetReferenceMode(a, self._hasLimitSwitches[a] or self._hasRefSwitch[a])
             if self._hasLimitSwitches[a] or self._hasRefSwitch[a]:
+                # TODO problem is that we now call it without a lock
+                #  -> we dont't wait until finished and bus gets reported that it it not referenced
+                #  cannot call doReference here as method on Bus
                 self.startReferencing(a)
 
         self._prev_speed_accel = ({}, {})
@@ -3084,6 +3086,11 @@ class Bus(model.Actuator):
 
     @isasync
     def reference(self, axes):
+        """
+        References the axes.
+        :param axes: (set of str) The axes that should be referenced.
+        :returns: (future) The referencing future.
+        """
         if not axes:
             return model.InstantaneousFuture()
         self._checkReference(axes)
@@ -3096,11 +3103,11 @@ class Bus(model.Actuator):
 
     def _doReference(self, future, axes):
         """
-        Actually runs the referencing code
-        axes (set of str)
-        raise:
+        Actually runs the referencing code.
+        :param axes: (set of str) The axes that should be referenced.
+        :raises:
             IOError: if referencing failed due to hardware
-            CancelledError if was cancelled
+            CancelledError: if was cancelled
         """
         # Reset reference so that if it fails, it states the axes are not
         # referenced (anymore)
@@ -3115,11 +3122,8 @@ class Bus(model.Actuator):
                     self.referenced._value[a] = False
                     controller.startReferencing(channel)
                     self._waitEndMove(future, (a,), time.time() + 100)  # block until it's over
-                    # self.SetHome(channel, 0.0)  # set negative limit as origin # TODO do similar thing
-                    # controller.getPosition("1")  # TODO is incorrect, should be 0 after referencing??
                     self.referenced._value[a] = True
             except CancelledError:
-                # TODO how does this work for the pigcs?? test!
                 # FIXME: if the referencing is stopped, the device refuses to
                 # move until referencing is run (and successful).
                 # => Need to put back the device into a mode where at least
@@ -3133,7 +3137,7 @@ class Bus(model.Actuator):
             finally:
                 # We only notify after updating the position so that when a listener
                 # receives updates both values are already updated.
-                self._updatePosition(axes)  # all the referenced axes should be back to 0
+                self._updatePosition(axes)  # all the referenced axes should be back to reference position
                 # read-only so manually notify
                 self.referenced.notify(self.referenced.value)
 
