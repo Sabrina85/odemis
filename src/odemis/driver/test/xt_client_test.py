@@ -820,7 +820,7 @@ class TestMicroscopeInternal(unittest.TestCase):
         mpp_orientation_info = self.microscope.mpp_orientation_info()
         self.assertIsInstance(mpp_orientation_info, dict)
         self.assertTrue("unit" in mpp_orientation_info)
-        self.assertIsInstance(mpp_orientation_info["range"], tuple)
+        self.assertIsInstance(mpp_orientation_info["range"], list)
         self.assertEqual(len(mpp_orientation_info["range"]), 2)
 
     def test_get_aperture_index(self):
@@ -863,7 +863,7 @@ class TestMicroscopeInternal(unittest.TestCase):
 
         aperture_index_info = self.microscope.aperture_index_info()
         self.assertIsInstance(aperture_index_info, dict)
-        self.assertIsInstance(aperture_index_info["range"], tuple)
+        self.assertIsInstance(aperture_index_info["range"], list)
         self.assertEqual(len(aperture_index_info["range"]), 2)
 
     def test_get_beamlet_index(self):
