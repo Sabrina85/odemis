@@ -59,10 +59,15 @@ CONFIG_MPPC = {"name": "MPPC", "role": "mppc"}
 CHILDREN_ASM = {"EBeamScanner"   : CONFIG_SCANNER,
                 "MirrorDescanner": CONFIG_DESCANNER,
                 "MPPC"           : CONFIG_MPPC}
-EXTRNAL_STORAGE = {"host"     : "localhost",
-                   "username" : "username",
-                   "password" : "password",
-                   "directory": "image_dir"}
+
+# EXTRNAL_STORAGE = {"host"     : "localhost",
+#                    "username" : "username",
+#                    "password" : "password",
+#                    "directory": "image_dir"}
+EXTRNAL_STORAGE = {"host"     : "127.0.0.1",
+                   "username" : "ftpuser",
+                   "password" : "tails",
+                   "directory": "test_images"}
 
 
 class TestAuxilaryFunc(unittest.TestCase):
