@@ -1133,7 +1133,14 @@ class MPPC(model.Detector):
 
                     acquisition_in_progress = True
                     megafield_metadata = args[0]
-                    self.parent.asmApiPostCall("/scan/start_mega_field", 204, megafield_metadata.to_dict())
+                    notifier_func = args[1]  # Return function (usually, dataflow.notify or acquire_single_field queue)
+                    try:
+                        self.parent.asmApiPostCall("/scan/start_mega_field", 204, megafield_metadata.to_dict())
+                        notifier_func(None)
+                    except Exception as ex:
+                        logging.error("_____________________________________________________________")
+                        notifier_func(ex)
+                        raise Exception
 
                 elif command == "next":
                     if not acquisition_in_progress:
@@ -1223,13 +1230,22 @@ class MPPC(model.Detector):
 
     def startAcquisition(self):
         """
-        Put a the command 'start' mega field scan on the queue with the appropriate MegaFieldMetaData Model of the mega
-        field image to be scanned. The MegaFieldMetaData is used to setup the HW accordingly, for each field image
+        Put the command 'start' mega field scan on the queue with the appropriate MegaFieldMetaData model of the mega
+        field image to be scanned. The MegaFieldMetaData is used to setup the HW accordingly. For each field image
         additional field image related metadata is provided.
         """
         self._ensure_acquisition_thread()
+        return_queue = queue.Queue()  # queue which allows to return error messages or None (if all was fine)
         megafield_metadata = self._assembleMegafieldMetadata()
-        self.acq_queue.put(("start", megafield_metadata))
+        self.acq_queue.put(("start", megafield_metadata, return_queue.put))
+        try:
+            status_start = return_queue.get(timeout=30)
+        except queue.Empty as ex:  # if timed out
+            logging.error("0000000000000000000000000000000000000000000000000000000000000")
+            raise ex
+        if status_start is not None:
+            logging.error("===================================================================")
+            raise status_start
 
     def getNextField(self, field_num):
         """
@@ -1252,17 +1268,17 @@ class MPPC(model.Detector):
 
     def stopAcquisition(self):
         """
-        Puts a 'stop' field image scan on the queue, after this call, no fields can be scanned anymore. A new mega
-        field can be started. The call triggers the post processing process to generate and offload additional zoom
-        levels.
+        Puts the command 'stop' field image scan on the queue. After this call, no fields can be scanned anymore.
+        A new mega field can be started. The call triggers the post processing process to generate and offload
+        additional zoom levels.
         """
-        self.acq_queue.put(("stop",))
+        self.acq_queue.put(("stop", ))
 
     def cancelAcquistion(self, execution_wait=0.2):
         """
-        Clears the entire queue and finished the current acquisition. Does not terminate acquisition thread.
+        Clears the entire queue and finishes the current acquisition. Does not terminate the acquisition thread.
         """
-        time.sleep(0.3)  # Wait to make sure noting is being loaded on the queue
+        time.sleep(0.3)  # Wait to make sure nothing is still being put on the queue
         # Clear the queue
         while True:
             try:
@@ -1273,14 +1289,14 @@ class MPPC(model.Detector):
         self.acq_queue.put(("stop", ))
 
         if execution_wait > 30:
-            logging.error("Failed to cancel the acquisition. mppc is terminated.")
+            logging.error("Failed to cancel the acquisition. MPPC detector is terminated.")
             self.terminate()
-            raise ConnectionError("Connection quality was to low to cancel the acquisition. mppc is terminated.")
+            raise ConnectionError("Connection quality was too poor to cancel the acquisition. MPPC is terminated.")
 
-        time.sleep(execution_wait)  # Wait until finish command is executed
+        time.sleep(execution_wait)  # Wait until command executed is finished
 
         if not self.acq_queue.empty():
-            self.cancelAcquistion(execution_wait=execution_wait * 2)  # Let the waiting time increase
+            self.cancelAcquistion(execution_wait=execution_wait * 2)  # Increase the waiting time
 
     def acquireSingleField(self, dataContent="thumbnail", field_num=(0, 0)):
         """
@@ -1303,7 +1319,16 @@ class MPPC(model.Detector):
 
         self._ensure_acquisition_thread()
 
-        self.acq_queue.put(("start", mega_field_data))
+        self.acq_queue.put(("start", mega_field_data, return_queue.put))
+        try:
+            status_start = return_queue.get(timeout=30)
+        except queue.Empty as ex:  # if timed out
+            logging.error("0000000000000000000000000000000000000000000000000000000000000")
+            raise ex
+        if status_start is not None:
+            logging.error("===================================================================")
+            raise status_start
+
         field_data = FieldMetaData(*self.convertFieldNum2Pixels(field_num))
 
         self.acq_queue.put(("next", field_data, dataContent, return_queue.put))
@@ -1526,7 +1551,10 @@ class ASMDataFlow(model.DataFlow):
         Start the dataflow using the provided function. The appropriate settings are retrieved via the VA's of the
         each component
         """
-        self._mppc.startAcquisition()
+        try:
+            self._mppc.startAcquisition()
+        except Exception as ex:
+            raise ex
 
     def next(self, field_num):
         """
@@ -1548,8 +1576,12 @@ class ASMDataFlow(model.DataFlow):
         """
         if self._count_listeners() < 1:
             # Acquire and return received image
-            image = self._mppc.acquireSingleField(*args, **kwargs)
-            return image
+            try:
+                image = self._mppc.acquireSingleField(*args, **kwargs)
+                return image
+            except Exception as ex:
+                logging.error("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+                raise ex
 
         else:
             logging.error("There is already an acquisition on going with %s listeners subscribed, first cancel/stop "
