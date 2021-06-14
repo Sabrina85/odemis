@@ -29,6 +29,8 @@ After installing the simulator it can be starting using the following commands i
 """
 import logging
 import math
+import queue
+
 import numpy
 from odemis import model
 from odemis.util import almost_equal
@@ -1300,56 +1302,6 @@ class Test_ASMDataFlow(unittest.TestCase):
         image = dataflow.get()
         self.assertIsInstance(image, model.DataArray)
 
-    def test_error_propagation_get(self):
-        # Change megafield id to prevent testing on existing images/overwriting issues.
-        self.MPPC.filename.value = time.strftime("testing_megafield_id-%Y-%m-%d-%H-%M-%S")
-
-        dataflow = self.MPPC.data
-
-        # put a large value on the .cellTranslation. That should raise an error in the ASM as the VA still excepts it.
-        self.MPPC.cellTranslation.value = self.cellTranslation = \
-            tuple(tuple((110, 110) for i in range(0, self.MPPC.shape[0])) for i in range(0, self.MPPC.shape[1]))
-        with self.assertRaises(Exception):
-            image = dataflow.get()
-
-        # now check that with the correct values an acquisition can again be performed
-        self.MPPC.cellTranslation.value = self.cellTranslation = \
-            tuple(tuple((10, 10) for i in range(0, self.MPPC.shape[0])) for i in range(0, self.MPPC.shape[1]))
-        image = dataflow.get()
-        self.assertIsInstance(image, model.DataArray)
-
-    def test_error_propagation_subscribe(self):
-        self.MPPC.filename.value = time.strftime("testing_megafield_id-%Y-%m-%d-%H-%M-%S")
-        field_images = (1, 2)
-        self.counter = 0
-        self.MPPC.dataContent.value = "thumbnail"
-
-        dataflow = self.MPPC.data
-
-        # put a large value on the .cellTranslation. That should raise an error in the ASM as the VA still excepts it.
-        self.MPPC.cellTranslation.value = self.cellTranslation = \
-            tuple(tuple((110, 110) for i in range(0, self.MPPC.shape[0])) for i in range(0, self.MPPC.shape[1]))
-        with self.assertRaises(Exception):
-            dataflow.subscribe(self.image_received)
-            # TODO @Eric: How to get rid of the subscribers?
-        # dataflow.unsubscribe(self.image_received)  # does not work as the acq queue is already terminated..
-
-        self.MPPC.cellTranslation.value = self.cellTranslation = \
-            tuple(tuple((110, 110) for i in range(0, self.MPPC.shape[0])) for i in range(0, self.MPPC.shape[1]))
-        dataflow.subscribe(self.image_received)  # TODO @Eric Why does this still not raise an error?
-        # # Iterate over each field, and wait for it to be acquired before acquiring the next one
-        # for x in range(field_images[0]):
-        #     for y in range(field_images[1]):
-        #         self._data_received.clear()
-        #         # Here the stage would move to the right position
-        #         dataflow.next((x, y))
-        #         # Allow 1.5 seconds per field image to be acquired
-        #         if not self._data_received.wait(1.5):
-        #             self.fail("No data received after 1.5s for field %d, %d" % (x, y))
-        #
-        # # Wait a bit to allow some processing and receive images.
-        # dataflow.unsubscribe(self.image_received)
-
     def test_dataContent_get_field(self):
         """
         Tests if the appropriate image size is returned after calling with empty, thumbnail or full image as
@@ -1571,6 +1523,107 @@ class Test_ASMDataFlow(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(field_images[0] * field_images[1], self.counter)
         self.assertEqual(field_images[0] * field_images[1], self.counter2)
+
+    # FIXME: Currently, the .cellTranslation VA does not properly check that the requested value can be actually
+    #  set on the HW. Thus, we can trigger an error raised in on the ASM and propagated to the dataflow.
+    #  Test need to be removed if the setter of the VA will be extended.
+    def test_error_propagation_get(self):
+        # Change megafield id to prevent testing on existing images/overwriting issues.
+        self.MPPC.filename.value = time.strftime("testing_megafield_id-%Y-%m-%d-%H-%M-%S")
+
+        dataflow = self.MPPC.data
+
+        # put a value on the mppc.cellTranslation which is accepted by the VA but not by the ASM
+        self.MPPC.cellTranslation.value = self.cellTranslation = \
+            tuple(tuple((110, 110) for i in range(0, self.MPPC.shape[0])) for i in range(0, self.MPPC.shape[1]))
+        with self.assertRaises(Exception):
+            image = dataflow.get()
+
+        # now check that with the correct values an acquisition can again be performed
+        self.MPPC.cellTranslation.value = self.cellTranslation = \
+            tuple(tuple((10, 10) for i in range(0, self.MPPC.shape[0])) for i in range(0, self.MPPC.shape[1]))
+        image = dataflow.get()
+        self.assertIsInstance(image, model.DataArray)
+
+    # FIXME: Currently, the .cellTranslation VA does not properly check that the requested value can be actually
+    #  set on the HW. Thus, we can trigger an error raised in on the ASM and propagated to the dataflow.
+    #  Test need to be removed if the setter of the VA will be extended.
+    def test_error_propagation_subscribe(self):
+        self.MPPC.filename.value = time.strftime("testing_megafield_id-%Y-%m-%d-%H-%M-%S")
+        field_images = (1, 2)
+        self.counter = 0
+        self.MPPC.dataContent.value = "thumbnail"
+
+        dataflow = self.MPPC.data
+
+        # put a value on the mppc.cellTranslation which is accepted by the VA but not by the ASM
+        self.MPPC.cellTranslation.value = self.cellTranslation = \
+            tuple(tuple((110, 110) for i in range(0, self.MPPC.shape[0])) for i in range(0, self.MPPC.shape[1]))
+        with self.assertRaises(Exception):
+            dataflow.subscribe(self.image_received)
+
+        # now check that with the correct values an acquisition can again be performed
+        self.MPPC.cellTranslation.value = self.cellTranslation = \
+            tuple(tuple((10, 10) for i in range(0, self.MPPC.shape[0])) for i in range(0, self.MPPC.shape[1]))
+        dataflow.subscribe(self.image_received)
+        # Iterate over each field, and wait for it to be acquired before acquiring the next one
+        for x in range(field_images[0]):
+            for y in range(field_images[1]):
+                self._data_received.clear()
+                # Here the stage would move to the right position
+                dataflow.next((x, y))
+                # Allow 1.5 seconds per field image to be acquired
+                if not self._data_received.wait(1.5):
+                    self.fail("No data received after 1.5s for field %d, %d" % (x, y))
+
+        # Wait a bit to allow some processing and receive images.
+        dataflow.unsubscribe(self.image_received)
+
+    # FIXME: Currently, the .cellTranslation VA does not properly check that the requested value can be actually
+    #  set on the HW. Thus, we can trigger an error raised in on the ASM and propagated to the dataflow.
+    #  Test need to be removed if the setter of the VA will be extended.
+    def test_error_propagation(self):
+        """
+        """
+        self.MPPC.filename.value = time.strftime("testing_megafield_id-%Y-%m-%d-%H-%M-%S")
+        dataflow = self.MPPC.data
+
+        img_queue_1 = queue.Queue()
+        img_queue_2 = queue.Queue()
+
+        def image_received_1(dataflow, da):
+            img_queue_1.put(da)
+            print("image received 1")
+
+        def image_received_2(dataflow, da):
+            img_queue_2.put(da)
+            print("image received 2")
+
+        # put a value on the mppc.cellTranslation which is accepted by the VA but not by the ASM
+        self.MPPC.cellTranslation.value = self.cellTranslation = \
+            tuple(tuple((110, 110) for i in range(0, self.MPPC.shape[0])) for i in range(0, self.MPPC.shape[1]))
+
+        with self.assertRaises(Exception):
+            dataflow.subscribe(image_received_1)
+
+        # put a value on the mppc.cellTranslation which is accepted by the VA and the ASM ASM
+        self.MPPC.cellTranslation.value = self.cellTranslation = \
+            tuple(tuple((10, 10) for i in range(0, self.MPPC.shape[0])) for i in range(0, self.MPPC.shape[1]))
+
+        dataflow.subscribe(image_received_2)
+        dataflow.next((0, 0))
+        img = img_queue_2.get(timeout=10)  # read the image
+        assert img_queue_1.empty()  # check that the previous subscriber did unsubscribe properly (image_received_1)
+        assert img_queue_2.empty()
+        dataflow.unsubscribe(image_received_2)
+
+        # TODO: This will not raise an exception yet. The dataflow would need to be extended to catch such an error.
+        #  So far the acquisition thread only warns that first an acquisition needs to be started.
+        # with self.assertRaises(Exception):
+        #     dataflow.next((0, 1))  # if there is no subscriber, this should fail
+        # assert img_queue_1.empty()
+        # assert img_queue_2.empty()
+
 
 if __name__ == '__main__':
     unittest.main()

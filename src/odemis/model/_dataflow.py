@@ -127,7 +127,13 @@ class DataFlowBase(object):
             self._listeners.add(WeakMethod(listener))
             logging.debug("Listener %r subscribed, now %d subscribers", listener, len(self._listeners))
             if count_before == 0:
-                self.start_generate()
+                try:
+                    self.start_generate()
+                except Exception as ex:
+                    logging.error("Subscribing listener %r to the dataflow failed. %s", listener, ex)
+                    self._listeners.discard(WeakMethod(listener))
+                    logging.debug("Listener %r unsubscribed, now %d subscribers", listener, len(self._listeners))
+                    raise
 
     def unsubscribe(self, listener):
         with self._lock:
@@ -335,9 +341,21 @@ class DataFlow(DataFlowBase):
                 assert callable(listener)
                 self._listeners.add(WeakMethod(listener))
 
-            logging.debug("Listener %r subscribed, now %d subscribers on %s", listener, self._count_listeners(), self._global_name)
+            logging.debug("Listener %r subscribed, now %d subscribers on %s",
+                          listener, self._count_listeners(), self._global_name)
             if count_before == 0:
-                self.start_generate()
+                try:
+                    self.start_generate()
+                except Exception as ex:
+                    logging.error("Subscribing listener %r to the dataflow failed. %s", listener, ex)
+                    if isinstance(listener, basestring):
+                        # remove string from listeners
+                        self._remote_listeners.discard(listener)
+                    else:
+                        self._listeners.discard(WeakMethod(listener))
+                    logging.debug("Listener %r unsubscribed, now %d subscribers on %s", listener,
+                                  self._count_listeners(), self._global_name)
+                    raise
 
     def unsubscribe(self, listener):
         with self._lock:
@@ -450,12 +468,16 @@ class DataFlowProxy(DataFlowBase, Pyro4.Proxy):
         if not self._thread:
             self._create_thread()
         self._commands.send(b"SUB")
-        self._commands.recv() # synchronise
+        self._commands.recv()  # synchronise
 
-        # send subscription to the actual dataflow
-        # a bit tricky because the underlying method gets created on the fly
-#        Pyro4.Proxy.subscribe(self, self._global_name)
-        Pyro4.Proxy.__getattr__(self, "subscribe")(self._proxy_name)
+        try:
+            # send subscription to the actual dataflow and inform dataflow that this remote listener is interested
+            # a bit tricky because the underlying method gets created on the fly
+            Pyro4.Proxy.__getattr__(self, "subscribe")(self._proxy_name)
+        except Exception as ex:
+            logging.error("Subscribing to the dataflow failed. %s", ex)
+            self._commands.send(b"UNSUB")  # asynchronous (necessary to not deadlock)
+            raise
 
     def stop_generate(self):
         # stop the remote subscription
